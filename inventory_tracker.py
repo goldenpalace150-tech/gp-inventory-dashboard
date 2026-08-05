@@ -31,6 +31,8 @@ if 'processed_invoices' not in st.session_state:
     st.session_state['processed_invoices'] = {}  # inv_num -> impact df
 if 'invoice_raw_data' not in st.session_state:
     st.session_state['invoice_raw_data'] = {}     # inv_num -> list of items/qtys
+if 'file_to_invoice' not in st.session_state:
+    st.session_state['file_to_invoice'] = {}      # file_name -> inv_num
 
 # Default user database managed by Admin
 if 'user_db' not in st.session_state:
@@ -146,31 +148,61 @@ with col1:
 with col2:
     uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير / وصلات التسليم", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-# Processing invoices logic with strict Duplicate vs. Adjustment validation
+# ==========================================
+# AUTO-ROLLBACK LOGIC FOR DELETED/REMOVED FILES
+# ==========================================
+current_file_names = {f.name for f in uploaded_invoices} if uploaded_invoices else set()
+processed_file_names = list(st.session_state['file_to_invoice'].keys())
+removed_files = [fname for fname in processed_file_names if fname not in current_file_names]
+
+if removed_files and st.session_state['live_stock'] is not None:
+    for fname in removed_files:
+        inv_num = st.session_state['file_to_invoice'][fname]
+        old_items = st.session_state['invoice_raw_data'].get(inv_num, [])
+        
+        # Restore stock quantities back
+        for old_row in old_items:
+            code = old_row['رمز المادة']
+            qty_to_restore = old_row['الكمية المخصومة']
+            st.session_state['live_stock'].loc[
+                st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
+            ] += qty_to_restore
+            
+        # Clean up session memory
+        st.session_state['processed_invoices'].pop(inv_num, None)
+        st.session_state['invoice_raw_data'].pop(inv_num, None)
+        st.session_state['file_to_invoice'].pop(fname, None)
+        
+    st.success("🔄 تم رصد حذف الفاتورة من صندوق الرفع، وتمت إعادة الكميات إلى المخزون تلقائياً!")
+    st.rerun()
+
+# ==========================================
+# PROCESSING INVOICES LOGIC
+# ==========================================
 if uploaded_invoices and st.session_state['live_stock'] is not None:
     if st.button("معالجة الفواتير وتحديث المخزون", type="primary", use_container_width=True):
-        with st.spinner("جاري استحصاء البيانات والتحقق من التكرار أو التعديلات..."):
+        with st.spinner("جاري معالجة البيانات والتحقق من التكرار أو التعديلات..."):
             for f in uploaded_invoices:
                 inv_num, items = extract_invoice_data(f)
                 extracted_df = pd.DataFrame(items)
                 extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
                 
+                # Link filename to invoice number
+                st.session_state['file_to_invoice'][f.name] = inv_num
+                
                 # Check if this invoice number was processed previously
                 old_items = st.session_state['invoice_raw_data'].get(inv_num, None)
                 
                 if old_items is not None:
-                    # Compare old items/qtys with new items/qtys to see if it's an exact duplicate
                     old_sorted = sorted(old_items, key=lambda x: str(x['رمز المادة']))
                     new_sorted = sorted(items, key=lambda x: str(x['رمز المادة']))
                     
                     is_exact_duplicate = (old_sorted == new_sorted)
                     
                     if is_exact_duplicate:
-                        # Big X Alert for exact duplicate
                         st.error(f"❌ خطأ كبير: هذه الفاتورة ({inv_num}) مطابقة تماماً وتمت معالجتها مسبقاً! تم تجاهل رفعها لتجنب التكرار.")
-                        continue # Skip this file completely
+                        continue 
                     else:
-                        # Adjustment detected: Revert old quantities first
                         st.warning(f"⚠️ تم رصد تعديل على الفاتورة ({inv_num})! يتم عكس محتواها القديم وتحديثها بالبيانات الجديدة.")
                         for old_row in old_items:
                             code = old_row['رمز المادة']
@@ -179,7 +211,7 @@ if uploaded_invoices and st.session_state['live_stock'] is not None:
                                 st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
                             ] += qty_to_restore
 
-                # Capture state BEFORE deduction for comparison table
+                # Capture state BEFORE deduction
                 live_df = st.session_state['live_stock'].copy()
                 live_df.rename(columns={'الكمية': 'الكمية قبل الفاتورة'}, inplace=True)
                 
