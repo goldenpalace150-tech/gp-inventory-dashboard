@@ -30,7 +30,7 @@ if 'live_stock' not in st.session_state:
 if 'processed_invoices' not in st.session_state:
     st.session_state['processed_invoices'] = {}  # inv_num -> impact df
 if 'invoice_raw_data' not in st.session_state:
-    st.session_state['invoice_raw_data'] = {}     # inv_num -> raw items dict list
+    st.session_state['invoice_raw_data'] = {}     # inv_num -> list of items/qtys
 
 # Default user database managed by Admin
 if 'user_db' not in st.session_state:
@@ -146,41 +146,52 @@ with col1:
 with col2:
     uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير / وصلات التسليم", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-# Processing invoices logic with Duplicate & Adjustment detection
+# Processing invoices logic with strict Duplicate vs. Adjustment validation
 if uploaded_invoices and st.session_state['live_stock'] is not None:
     if st.button("معالجة الفواتير وتحديث المخزون", type="primary", use_container_width=True):
-        with st.spinner("جاري استخراج البيانات والتحقق من التكرار أو التعديلات..."):
+        with st.spinner("جاري استحصاء البيانات والتحقق من التكرار أو التعديلات..."):
             for f in uploaded_invoices:
                 inv_num, items = extract_invoice_data(f)
                 extracted_df = pd.DataFrame(items)
                 extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
                 
-                # Check if this invoice number was already processed before
-                if inv_num in st.session_state['processed_invoices']:
-                    st.warning(f"⚠️ تنبيه: الفاتورة ({inv_num}) مسجلة مسبقاً! يتم الآن تحديث التعديلات وحذف القديمة.")
-                    
-                    # 1. Revert previous deductions back into live stock
-                    old_items = st.session_state['invoice_raw_data'][inv_num]
-                    for old_row in old_items:
-                        code = old_row['رمز المادة']
-                        qty_to_restore = old_row['الكمية المخصومة']
-                        st.session_state['live_stock'].loc[
-                            st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
-                        ] += qty_to_restore
+                # Check if this invoice number was processed previously
+                old_items = st.session_state['invoice_raw_data'].get(inv_num, None)
                 
-                # 2. Capture state BEFORE deduction for comparison
+                if old_items is not None:
+                    # Compare old items/qtys with new items/qtys to see if it's an exact duplicate
+                    old_sorted = sorted(old_items, key=lambda x: str(x['رمز المادة']))
+                    new_sorted = sorted(items, key=lambda x: str(x['رمز المادة']))
+                    
+                    is_exact_duplicate = (old_sorted == new_sorted)
+                    
+                    if is_exact_duplicate:
+                        # Big X Alert for exact duplicate
+                        st.error(f"❌ خطأ كبير: هذه الفاتورة ({inv_num}) مطابقة تماماً وتمت معالجتها مسبقاً! تم تجاهل رفعها لتجنب التكرار.")
+                        continue # Skip this file completely
+                    else:
+                        # Adjustment detected: Revert old quantities first
+                        st.warning(f"⚠️ تم رصد تعديل على الفاتورة ({inv_num})! يتم عكس محتواها القديم وتحديثها بالبيانات الجديدة.")
+                        for old_row in old_items:
+                            code = old_row['رمز المادة']
+                            qty_to_restore = old_row['الكمية المخصومة']
+                            st.session_state['live_stock'].loc[
+                                st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
+                            ] += qty_to_restore
+
+                # Capture state BEFORE deduction for comparison table
                 live_df = st.session_state['live_stock'].copy()
                 live_df.rename(columns={'الكمية': 'الكمية قبل الفاتورة'}, inplace=True)
                 
-                # 3. Merge and compute AFTER state for the new/adjusted invoice
+                # Merge and compute AFTER state
                 merged_df = pd.merge(live_df, extracted_df[['رمز المادة', 'الكمية المخصومة']], on='رمز المادة', how='inner')
                 merged_df['الكمية بعد الفاتورة'] = merged_df['الكمية قبل الفاتورة'] - merged_df['الكمية المخصومة']
                 
-                # Save impact report and raw data
+                # Save impact report and raw data safely
                 st.session_state['processed_invoices'][inv_num] = merged_df
                 st.session_state['invoice_raw_data'][inv_num] = items
                 
-                # 4. Apply new deductions to global live stock
+                # Apply new deductions to global live stock
                 for idx, row in extracted_df.iterrows():
                     code = row['رمز المادة']
                     qty_deduct = row['الكمية المخصومة']
@@ -188,7 +199,7 @@ if uploaded_invoices and st.session_state['live_stock'] is not None:
                         st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
                     ] -= qty_deduct
                         
-            st.success("✅ تمت معالجة الفواتير وتحديث المخزون بنجاح (مع رصد التعديلات إن وجدت).")
+            st.success("✅ تمت معالجة الفواتير بنجاح وتحديث حالة المخزون!")
 
     st.divider()
 
