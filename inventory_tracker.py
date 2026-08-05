@@ -5,28 +5,23 @@ import io
 import json
 
 # ==========================================
-# PAGE CONFIGURATION & ARABIC RTL STYLING WITH BACKGROUND
+# PAGE CONFIGURATION & MOBILE-FRIENDLY RTL STYLING
 # ==========================================
 st.set_page_config(page_title="متتبع الجرد - القصر الذهبي", layout="wide")
 
 st.markdown("""
     <style>
         .stApp {
-            background-image: linear-gradient(rgba(248, 249, 250, 0.92), rgba(248, 249, 250, 0.92)), 
-                              url("https://images.unsplash.com/photo-1509391365360-e835f377c8e7?q=80&w=1920&auto=format&fit=crop");
-            background-size: cover;
-            background-position: center;
-            background-repeat: no-repeat;
             direction: rtl;
         }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; flex-wrap: wrap; }
         .stTabs [data-baseweb="tab"] {
-            background-color: #ffffff;
+            background-color: #f0f2f6;
             border-radius: 4px;
             padding: 8px 16px;
             font-size: 14px;
         }
-        table { width: 100% !important; font-size: 13px !important; background-color: white; }
+        table { width: 100% !important; font-size: 13px !important; }
         .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     </style>
 """, unsafe_allow_html=True)
@@ -123,7 +118,7 @@ def extract_invoice_data(uploaded_file):
 # HELPER: SEARCHABLE TABLE
 # ==========================================
 def display_searchable_table(df, key_prefix):
-    search_query = st.text_input("🔍 بحث في المخزون (برمز المادة أو اسم المادة):", key=f"search_{key_prefix}")
+    search_query = st.text_input("🔍 بحث في المخزون (بررمز المادة أو اسم المادة):", key=f"search_{key_prefix}")
     
     if search_query:
         mask = df['رمز المادة'].astype(str).str.contains(search_query, case=False, na=False) | \
@@ -329,7 +324,6 @@ with st.form("manual_movement_form"):
         
     m_note = st.text_input("ملاحظات / سبب الحركة")
     
-    # Delivery note validation alert for OUT movements
     delivery_note_received = True
     if "إخراج" in m_type:
         st.warning("⚠️ تنبيه هام: وصل التسليم (Delivery Note) مطلوب لحركات الإخراج اليدوي ولا يتم اعتماد الخصم إلا بعد التأكيد!")
