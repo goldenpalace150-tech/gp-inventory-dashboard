@@ -127,7 +127,7 @@ def display_searchable_table(df, key_prefix):
         st.info("أدخل مصطلح بحث أعلاه لعرض المواد (تم إخفاء القائمة الكاملة لتوفير المساحة وتناسب الشاشات).")
 
 # ==========================================
-# 1. CONTROLS SECTION WITH ICONS & OPTIONAL CAMERA
+# 1. CONTROLS SECTION WITH ICONS & CONDITIONAL CAMERA
 # ==========================================
 st.subheader("لوحة التحكم")
 
@@ -188,9 +188,10 @@ with col1:
 with col2:
     uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير (من الألبوم)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-# OPTIONAL CAMERA SECTION (Hidden by default, opens ONLY when clicked)
+# STRICT CONDITIONAL CAMERA: Fully off until the checkbox is checked by the user
 camera_image = None
-with st.expander("📸 التقاط صورة الفاتورة بالكاميرا مباشرة (اختياري)"):
+enable_camera = st.checkbox("📸 تفعيل الكاميرا لالتقاط صورة الفاتورة مباشرة")
+if enable_camera:
     camera_image = st.camera_input("وجه الكاميرا نحو الفاتورة ثم اضغط التقاط")
 
 # Combine uploaded files and optional camera capture into a unified list
