@@ -19,7 +19,6 @@ st.markdown("""
             padding: 8px 16px;
             font-size: 14px;
         }
-        /* Mobile optimization for tables and containers */
         table { width: 100% !important; font-size: 13px !important; }
         .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     </style>
@@ -33,11 +32,11 @@ st.title("القصر الذهبي - متتبع الجرد اليومي المب�
 if 'live_stock' not in st.session_state:
     st.session_state['live_stock'] = None
 if 'processed_invoices' not in st.session_state:
-    st.session_state['processed_invoices'] = {}  # inv_num -> impact df
+    st.session_state['processed_invoices'] = {}
 if 'invoice_raw_data' not in st.session_state:
-    st.session_state['invoice_raw_data'] = {}     # inv_num -> list of items/qtys
+    st.session_state['invoice_raw_data'] = {}
 if 'file_to_invoice' not in st.session_state:
-    st.session_state['file_to_invoice'] = {}      # file_name -> inv_num
+    st.session_state['file_to_invoice'] = {}
 
 # Default user database managed by Admin
 if 'user_db' not in st.session_state:
@@ -117,7 +116,7 @@ def extract_invoice_data(uploaded_file):
 # HELPER: SEARCHABLE TABLE
 # ==========================================
 def display_searchable_table(df, key_prefix):
-    search_query = st.text_input("🔍 بحث في المخزون (بررمز المادة أو اسم المادة):", key=f"search_{key_prefix}")
+    search_query = st.text_input("🔍 بحث في المخزون (برمز المادة أو اسم المادة):", key=f"search_{key_prefix}")
     
     if search_query:
         mask = df['رمز المادة'].astype(str).str.contains(search_query, case=False, na=False) | \
@@ -128,11 +127,11 @@ def display_searchable_table(df, key_prefix):
         st.info("أدخل مصطلح بحث أعلاه لعرض المواد (تم إخفاء القائمة الكاملة لتوفير المساحة وتناسب الشاشات).")
 
 # ==========================================
-# 1. CONTROLS SECTION WITH ICONS & CAMERA
+# 1. CONTROLS SECTION WITH ICONS & OPTIONAL CAMERA
 # ==========================================
 st.subheader("لوحة التحكم")
 
-# Session State Backup & Restore (Save/Load progress)
+# Session State Backup & Restore
 with st.expander("💾 حفظ أو استعادة حالة العمل (لتجنب فقدان البيانات عند الخروج)"):
     col_save, col_load = st.columns(2)
     with col_save:
@@ -189,10 +188,12 @@ with col1:
 with col2:
     uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير (من الألبوم)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-# Direct Camera Option for Mobile / Desktop Webcams
-camera_image = st.camera_input("📸 أو التقاط صورة الفاتورة بالكاميرا مباشرة")
+# OPTIONAL CAMERA SECTION (Hidden by default, opens ONLY when clicked)
+camera_image = None
+with st.expander("📸 التقاط صورة الفاتورة بالكاميرا مباشرة (اختياري)"):
+    camera_image = st.camera_input("وجه الكاميرا نحو الفاتورة ثم اضغط التقاط")
 
-# Combine uploaded files and camera capture into a unified list
+# Combine uploaded files and optional camera capture into a unified list
 active_invoices_list = []
 if uploaded_invoices:
     active_invoices_list.extend(uploaded_invoices)
