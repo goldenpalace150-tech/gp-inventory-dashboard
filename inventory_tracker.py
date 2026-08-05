@@ -6,8 +6,7 @@ from PIL import Image
 # SIMULATED AI EXTRACTION (Instant)
 # ==========================================
 def extract_invoice_data(image):
-    # This instantly returns structured data mapped by Item Code.
-    # In production, this is where the API call (e.g., Google Gemini) goes.
+    # Simulated data extraction mapping directly to Item Code
     return [
         {"رمز المادة": "0104084", "الكمية المخصومة": 14.0},
         {"رمز المادة": "50009", "الكمية المخصومة": 1.0}
@@ -16,21 +15,31 @@ def extract_invoice_data(image):
 # ==========================================
 # PAGE CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Golden Palace Inventory", layout="wide")
-st.title("Golden Palace - Daily Inventory Tracker")
+st.set_page_config(page_title="متتبع الجرد - القصر الذهبي", layout="wide")
+
+# Force Right-to-Left (RTL) layout for Arabic text support
+st.markdown("""
+    <style>
+        .stApp {
+            direction: rtl;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("القصر الذهبي - متتبع الجرد اليومي")
 
 # ==========================================
-# 1. CONTROLS SECTION (ALWAYS AT THE TOP)
+# 1. CONTROLS SECTION
 # ==========================================
-st.subheader("Control Panel")
+st.subheader("لوحة التحكم")
 
 col1, col2 = st.columns(2)
 with col1:
-    uploaded_stock_report = st.file_uploader("1. Upload Excel Stock Report (.xlsx)", type=["xlsx", "xls"])
+    uploaded_stock_report = st.file_uploader("1. رفع تقرير المخزون (Excel)", type=["xlsx", "xls"])
 with col2:
-    uploaded_invoice = st.file_uploader("2. Upload Delivery Note Image", type=["png", "jpg", "jpeg"])
+    uploaded_invoice = st.file_uploader("2. رفع صورة الفاتورة أو وصل التسليم", type=["png", "jpg", "jpeg"])
 
-extract_button = st.button("Extract Data & Update Stock", type="primary", use_container_width=True)
+extract_button = st.button("استخراج البيانات وتحديث المخزون", type="primary", use_container_width=True)
 
 st.divider()
 
@@ -40,9 +49,9 @@ st.divider()
 
 if extract_button:
     if uploaded_invoice is None or uploaded_stock_report is None:
-        st.warning("⚠️ Please upload both the Excel stock report and the Delivery Note image first.")
+        st.warning("⚠️ يرجى رفع تقرير المخزون وصورة الفاتورة أولاً.")
     else:
-        with st.spinner("Extracting delivery note and mapping via رمز المادة..."):
+        with st.spinner("جاري استخراج بيانات الفاتورة ومطابقتها عبر رمز المادة..."):
             try:
                 # 1. Run instant extraction
                 extracted_items = extract_invoice_data(uploaded_invoice)
@@ -53,54 +62,53 @@ if extract_button:
                 stock_df = stock_df[['رمز المادة', 'اسم المادة', 'الكمية']]
                 stock_df = stock_df.dropna(subset=['رمز المادة'])
                 
-                # Rename the original quantity column to represent the "Before" state
                 stock_df.rename(columns={'الكمية': 'الكمية السابقة'}, inplace=True)
                 
-                # Ensure Item Codes are treated as strings for perfect mapping
+                # CRITICAL FIX: Force the Excel quantities to be treated as numbers, not text
+                stock_df['الكمية السابقة'] = pd.to_numeric(stock_df['الكمية السابقة'], errors='coerce').fillna(0)
+                
+                # Ensure Item Codes are stripped text strings for perfect mapping
                 stock_df['رمز المادة'] = stock_df['رمز المادة'].astype(str).str.strip()
                 extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
                 
                 # 3. Merge data strictly using Item Code (رمز المادة)
                 updated_df = pd.merge(stock_df, extracted_df, on='رمز المادة', how='left')
                 
-                # Fill items that were not on the invoice with 0 deduction
-                updated_df['الكمية المخصومة'] = updated_df['الكمية المخصومة'].fillna(0)
+                # Fill missing deductions with 0
+                updated_df['الكمية المخصومة'] = pd.to_numeric(updated_df['الكمية المخصومة'], errors='coerce').fillna(0)
                 
                 # 4. Calculate the "After" state
                 updated_df['الكمية الجديدة'] = updated_df['الكمية السابقة'] - updated_df['الكمية المخصومة']
                 
-                # Filter down to only show the items that changed
                 changed_items_df = updated_df[updated_df['الكمية المخصومة'] > 0]
                 
                 # --- UI DISPLAY ---
-                st.success("✅ Extraction complete! Stock updated instantly.")
+                st.success("✅ تمت عملية الاستخراج! تم تحديث المخزون بنجاح.")
                 
-                # Show Before and After Comparison
-                st.subheader("Invoice Impact (Before & After)")
+                st.subheader("تأثير الفاتورة (قبل وبعد الخصم)")
                 st.markdown(changed_items_df.to_html(index=False), unsafe_allow_html=True)
                 
                 st.divider()
                 
-                # Show Full Updated Stock
-                st.subheader("Full Updated Stock Report")
+                st.subheader("تقرير المخزون الكامل المحدث")
                 st.markdown(updated_df.to_html(index=False), unsafe_allow_html=True)
                 
             except KeyError:
-                st.error("Error: Could not find the exact column names. Ensure the second row contains 'رمز المادة', 'اسم المادة', and 'الكمية'.")
+                st.error("خطأ: لم يتم العثور على الأعمدة المطلوبة. تأكد من أن الصف الثاني في ملف الإكسيل يحتوي على 'رمز المادة'، 'اسم المادة'، و 'الكمية'.")
             except Exception as e:
-                st.error(f"An error occurred: {e}")
+                st.error(f"حدث خطأ أثناء المعالجة: {e}")
 
-# If the button hasn't been clicked, but files are uploaded, just show previews
+# If the button hasn't been clicked, but files are uploaded, show previews
 elif uploaded_invoice is not None or uploaded_stock_report is not None:
     col_img, col_data = st.columns(2)
     
     with col_img:
         if uploaded_invoice is not None:
-            st.subheader("Invoice Preview")
+            st.subheader("معاينة الفاتورة")
             st.image(Image.open(uploaded_invoice), use_column_width=True)
             
     with col_data:
         if uploaded_stock_report is not None:
-            st.subheader("Current Stock (Unchanged)")
+            st.subheader("المخزون الحالي (بدون تعديل)")
             preview_df = pd.read_excel(uploaded_stock_report, header=1)[['رمز المادة', 'اسم المادة', 'الكمية']].dropna(subset=['رمز المادة'])
             st.markdown(preview_df.to_html(index=False), unsafe_allow_html=True)
