@@ -5,21 +5,28 @@ import io
 import json
 
 # ==========================================
-# PAGE CONFIGURATION & MOBILE-FRIENDLY RTL STYLING
+# PAGE CONFIGURATION & ARABIC RTL STYLING WITH BACKGROUND
 # ==========================================
 st.set_page_config(page_title="متتبع الجرد - القصر الذهبي", layout="wide")
 
 st.markdown("""
     <style>
-        .stApp { direction: rtl; }
+        .stApp {
+            background-image: linear-gradient(rgba(248, 249, 250, 0.92), rgba(248, 249, 250, 0.92)), 
+                              url("https://images.unsplash.com/photo-1509391365360-e835f377c8e7?q=80&w=1920&auto=format&fit=crop");
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            direction: rtl;
+        }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; flex-wrap: wrap; }
         .stTabs [data-baseweb="tab"] {
-            background-color: #f0f2f6;
+            background-color: #ffffff;
             border-radius: 4px;
             padding: 8px 16px;
             font-size: 14px;
         }
-        table { width: 100% !important; font-size: 13px !important; }
+        table { width: 100% !important; font-size: 13px !important; background-color: white; }
         .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     </style>
 """, unsafe_allow_html=True)
@@ -127,7 +134,7 @@ def display_searchable_table(df, key_prefix):
         st.info("أدخل مصطلح بحث أعلاه لعرض المواد (تم إخفاء القائمة الكاملة لتوفير المساحة وتناسب الشاشات).")
 
 # ==========================================
-# 1. CONTROLS SECTION WITH ICONS & CONDITIONAL CAMERA
+# 1. CONTROLS SECTION
 # ==========================================
 st.subheader("لوحة التحكم")
 
@@ -188,13 +195,13 @@ with col1:
 with col2:
     uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير (من الألبوم)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-# STRICT CONDITIONAL CAMERA: Fully off until the checkbox is checked by the user
+# STRICT OPTIONAL CAMERA: Fully off until checked
 camera_image = None
 enable_camera = st.checkbox("📸 تفعيل الكاميرا لالتقاط صورة الفاتورة مباشرة")
 if enable_camera:
     camera_image = st.camera_input("وجه الكاميرا نحو الفاتورة ثم اضغط التقاط")
 
-# Combine uploaded files and optional camera capture into a unified list
+# Combine uploaded files and optional camera capture
 active_invoices_list = []
 if uploaded_invoices:
     active_invoices_list.extend(uploaded_invoices)
@@ -230,53 +237,57 @@ if removed_files and st.session_state['live_stock'] is not None:
 # ==========================================
 # PROCESSING INVOICES LOGIC
 # ==========================================
-if active_invoices_list and st.session_state['live_stock'] is not None:
+if active_invoices_list:
     if st.button("معالجة الفواتير وتحديث المخزون", type="primary", use_container_width=True):
-        with st.spinner("جاري معالجة البيانات والتحقق من التكرار أو التعديلات..."):
-            for f in active_invoices_list:
-                inv_num, items = extract_invoice_data(f)
-                extracted_df = pd.DataFrame(items)
-                extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
-                
-                st.session_state['file_to_invoice'][f.name] = inv_num
-                
-                old_items = st.session_state['invoice_raw_data'].get(inv_num, None)
-                
-                if old_items is not None:
-                    old_sorted = sorted(old_items, key=lambda x: str(x['رمز المادة']))
-                    new_sorted = sorted(items, key=lambda x: str(x['رمز المادة']))
+        # STRICT VALIDATION: Block processing if base stock report is NOT uploaded
+        if st.session_state['live_stock'] is None:
+            st.error("❌ خطأ: يجب عليك رفع تقرير المخزون الأساسي (Excel) أولاً قبل معالجة أي فواتير!")
+        else:
+            with st.spinner("جاري معالجة البيانات والتحقق من التكرار أو التعديلات..."):
+                for f in active_invoices_list:
+                    inv_num, items = extract_invoice_data(f)
+                    extracted_df = pd.DataFrame(items)
+                    extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
                     
-                    is_exact_duplicate = (old_sorted == new_sorted)
+                    st.session_state['file_to_invoice'][f.name] = inv_num
                     
-                    if is_exact_duplicate:
-                        st.error(f"❌ خطأ كبير: هذه الفاتورة ({inv_num}) مطابقة تماماً وتمت معالجتها مسبقاً! تم تجاهل رفعها لتجنب التكرار.")
-                        continue 
-                    else:
-                        st.warning(f"⚠️ تم رصد تعديل على الفاتورة ({inv_num})! يتم عكس محتواها القديم وتحديثها بالبيانات الجديدة.")
-                        for old_row in old_items:
-                            code = old_row['رمز المادة']
-                            qty_to_restore = old_row['الكمية المخصومة']
-                            st.session_state['live_stock'].loc[
-                                st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
-                            ] += qty_to_restore
-
-                live_df = st.session_state['live_stock'].copy()
-                live_df.rename(columns={'الكمية': 'الكمية قبل الفاتورة'}, inplace=True)
-                
-                merged_df = pd.merge(live_df, extracted_df[['رمز المادة', 'الكمية المخصومة']], on='رمز المادة', how='inner')
-                merged_df['الكمية بعد الفاتورة'] = merged_df['الكمية قبل الفاتورة'] - merged_df['الكمية المخصومة']
-                
-                st.session_state['processed_invoices'][inv_num] = merged_df
-                st.session_state['invoice_raw_data'][inv_num] = items
-                
-                for idx, row in extracted_df.iterrows():
-                    code = row['رمز المادة']
-                    qty_deduct = row['الكمية المخصومة']
-                    st.session_state['live_stock'].loc[
-                        st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
-                    ] -= qty_deduct
+                    old_items = st.session_state['invoice_raw_data'].get(inv_num, None)
+                    
+                    if old_items is not None:
+                        old_sorted = sorted(old_items, key=lambda x: str(x['رمز المادة']))
+                        new_sorted = sorted(items, key=lambda x: str(x['رمز المادة']))
                         
-            st.success("✅ تمت معالجة الفواتير بنجاح وتحديث حالة المخزون!")
+                        is_exact_duplicate = (old_sorted == new_sorted)
+                        
+                        if is_exact_duplicate:
+                            st.error(f"❌ خطأ كبير: هذه الفاتورة ({inv_num}) مطابقة تماماً وتمت معالجتها مسبقاً! تم تجاهل رفعها لتجنب التكرار.")
+                            continue 
+                        else:
+                            st.warning(f"⚠️ تم رصد تعديل على الفاتورة ({inv_num})! يتم عكس محتواها القديم وتحديثها بالبيانات الجديدة.")
+                            for old_row in old_items:
+                                code = old_row['رمز المادة']
+                                qty_to_restore = old_row['الكمية المخصومة']
+                                st.session_state['live_stock'].loc[
+                                    st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
+                                ] += qty_to_restore
+
+                    live_df = st.session_state['live_stock'].copy()
+                    live_df.rename(columns={'الكمية': 'الكمية قبل الفاتورة'}, inplace=True)
+                    
+                    merged_df = pd.merge(live_df, extracted_df[['رمز المادة', 'الكمية المخصومة']], on='رمز المادة', how='inner')
+                    merged_df['الكمية بعد الفاتورة'] = merged_df['الكمية قبل الفاتورة'] - merged_df['الكمية المخصومة']
+                    
+                    st.session_state['processed_invoices'][inv_num] = merged_df
+                    st.session_state['invoice_raw_data'][inv_num] = items
+                    
+                    for idx, row in extracted_df.iterrows():
+                        code = row['رمز المادة']
+                        qty_deduct = row['الكمية المخصومة']
+                        st.session_state['live_stock'].loc[
+                            st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
+                        ] -= qty_deduct
+                            
+                st.success("✅ تمت معالجة الفواتير بنجاح وتحديث حالة المخزون!")
 
     st.divider()
 
