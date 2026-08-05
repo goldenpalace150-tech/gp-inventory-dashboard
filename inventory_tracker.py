@@ -239,7 +239,6 @@ if removed_files and st.session_state['live_stock'] is not None:
 # ==========================================
 if active_invoices_list:
     if st.button("معالجة الفواتير وتحديث المخزون", type="primary", use_container_width=True):
-        # STRICT VALIDATION: Block processing if base stock report is NOT uploaded
         if st.session_state['live_stock'] is None:
             st.error("❌ خطأ: يجب عليك رفع تقرير المخزون الأساسي (Excel) أولاً قبل معالجة أي فواتير!")
         else:
@@ -315,7 +314,61 @@ if active_invoices_list:
                     st.markdown(impact_df[['رمز المادة', 'اسم المادة', 'الكمية قبل الفاتورة', 'الكمية المخصومة', 'الكمية بعد الفاتورة']].to_html(index=False), unsafe_allow_html=True)
 
 # ==========================================
-# 3. LIVE STOCK & END OF DAY EXPORT
+# 3. MANUAL IN / OUT STOCK MOVEMENTS
+# ==========================================
+st.divider()
+st.subheader("📝 حركة المخزون اليدوية (إدخال / إخراج)")
+with st.form("manual_movement_form"):
+    m_col1, m_col2, m_col3 = st.columns(3)
+    with m_col1:
+        m_code = st.text_input("رمز المادة (مطابق لتقرير المخزون)")
+    with m_col2:
+        m_type = st.selectbox("نوع الحركة", ["إدخال (IN - زيادة المخزون)", "إخراج (OUT - خصم من المخزون)"])
+    with m_col3:
+        m_qty = st.number_input("الكمية", min_value=0.0, step=1.0)
+        
+    m_note = st.text_input("ملاحظات / سبب الحركة")
+    
+    # Delivery note validation alert for OUT movements
+    delivery_note_received = True
+    if "إخراج" in m_type:
+        st.warning("⚠️ تنبيه هام: وصل التسليم (Delivery Note) مطلوب لحركات الإخراج اليدوي ولا يتم اعتماد الخصم إلا بعد التأكيد!")
+        delivery_note_received = st.checkbox("✅ أؤكد أنني استلامت وصل التسليم الخاص بهذه الحركة")
+        
+    m_submit = st.form_submit_button("تنفيذ الحركة اليدوية وتحديث المخزون", use_container_width=True)
+    
+    if m_submit:
+        if st.session_state['live_stock'] is None:
+            st.error("❌ خطأ: يجب تحميل تقرير المخزون الأساسي (Excel) أولاً.")
+        elif not m_code:
+            st.warning("⚠️ يرجى إدخال رمز المادة.")
+        elif m_qty <= 0:
+            st.warning("⚠️ يرجى إدخال كمية صحيحة أكبر من صفر.")
+        elif "إخراج" in m_type and not delivery_note_received:
+            st.error("❌ لا يمكن تنفيذ حركة الإخراج! يجب تأكيد استلام وصل التسليم (Delivery Note) أولاً.")
+        else:
+            live_df = st.session_state['live_stock']
+            m_code_clean = str(m_code).strip()
+            match = live_df[live_df['رمز المادة'].astype(str).str.strip() == m_code_clean]
+            
+            if match.empty:
+                st.error(f"❌ رمز المادة '{m_code_clean}' غير موجود في المخزون الحالي.")
+            else:
+                if "إدخال" in m_type:
+                    st.session_state['live_stock'].loc[
+                        st.session_state['live_stock']['رمز المادة'].astype(str).str.strip() == m_code_clean, 'الكمية'
+                    ] += m_qty
+                    st.success(f"✅ تم إضافة كمية ({m_qty}) للمادة {m_code_clean} بنجاح.")
+                    st.rerun()
+                else:
+                    st.session_state['live_stock'].loc[
+                        st.session_state['live_stock']['رمز المادة'].astype(str).str.strip() == m_code_clean, 'الكمية'
+                    ] -= m_qty
+                    st.success(f"✅ تم خصم كمية ({m_qty}) للمادة {m_code_clean} (بعد تأكيد استلام وصل التسليم) بنجاح.")
+                    st.rerun()
+
+# ==========================================
+# 4. LIVE STOCK & END OF DAY EXPORT
 # ==========================================
 if st.session_state['live_stock'] is not None:
     st.divider()
