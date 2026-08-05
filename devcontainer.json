@@ -1,0 +1,7 @@
+{
+    "name": "Inventory Dashboard",
+    "image": "mcr.microsoft.com/devcontainers/python:3.11",
+    "features": {},
+    "forwardPorts": [8501],
+    "postCreateCommand": "pip install -r requirements.txt"
+}
