@@ -12,30 +12,25 @@ uploaded_stock_report = st.file_uploader("Upload your Excel stock report (.xlsx)
 
 if uploaded_stock_report is not None:
     try:
-        # Read the uploaded Excel file
-        stock_df = pd.read_excel(uploaded_stock_report)
-        st.success("Stock report loaded successfully!")
+        # Read the Excel file, skipping the first row (header=1) to grab the correct column names
+        stock_df = pd.read_excel(uploaded_stock_report, header=1)
+        
+        # Filter down strictly to the required columns
+        stock_df = stock_df[['رمز المادة', 'اسم المادة', 'الكمية']]
+        
+        # Clean up any trailing empty rows from the bottom of the Excel sheet
+        stock_df = stock_df.dropna(subset=['رمز المادة'])
+
+        st.success("Stock report loaded and filtered successfully!")
         
         st.subheader("Current Stock Overview")
         
-        # BYPASS THE CRASH: Convert the dataframe to a raw HTML table
-        # This avoids PyArrow memory constraints in the cloud container completely
+        # Display the cleaned table safely using HTML
         html_table = stock_df.to_html(index=False)
         st.markdown(html_table, unsafe_allow_html=True)
         
-        st.divider()
-        st.subheader("System Verification")
-        
-        # Verify the columns for the upcoming invoice scanner integration
-        columns = stock_df.columns.tolist()
-        st.write("**Detected Columns:**", columns)
-        
-        # Prepare for data aggregation mapped via item code
-        if "رمز المادة" in columns:
-            st.info("✅ 'رمز المادة' (Item Code) detected. The upcoming invoice scanner will strictly map quantities using this code.")
-        else:
-            st.warning("⚠️ 'رمز المادة' not found in the uploaded file. Please ensure your Excel sheet contains this exact column header.")
-        
+    except KeyError:
+        st.error("Error: Could not find the exact column names. Please ensure the second row contains 'رمز المادة', 'اسم المادة', and 'الكمية'.")
     except Exception as e:
         st.error(f"Error reading the Excel file: {e}")
 else:
