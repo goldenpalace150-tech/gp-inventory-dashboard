@@ -16,11 +16,13 @@ if uploaded_stock_report is not None:
         stock_df = pd.read_excel(uploaded_stock_report)
         st.success("Stock report loaded successfully!")
         
-        # Display the data in an interactive table
+        # Display the data
         st.subheader("Current Stock Overview")
-        st.dataframe(stock_df, use_container_width=True)
         
-        # Display detected columns to verify our item code mapping later
+        # BYPASS CRASH: Using st.table instead of st.dataframe
+        st.table(stock_df)
+        
+        # Display detected columns
         st.write("**Detected Columns:**")
         st.write(stock_df.columns.tolist())
         
