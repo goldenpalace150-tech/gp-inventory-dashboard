@@ -16,11 +16,12 @@ if uploaded_stock_report is not None:
         stock_df = pd.read_excel(uploaded_stock_report)
         st.success("Stock report loaded successfully!")
         
-        # Display the data
         st.subheader("Current Stock Overview")
         
-        # BYPASS CRASH: Using st.table instead of st.dataframe
-        st.table(stock_df)
+        # BYPASS CRASH: Convert dataframe to a raw HTML string
+        # This completely avoids the PyArrow memory crash in GitHub Codespaces
+        html_table = stock_df.to_html(index=False)
+        st.markdown(html_table, unsafe_allow_html=True)
         
         # Display detected columns
         st.write("**Detected Columns:**")
