@@ -62,8 +62,8 @@ else:
     current_user = st.session_state['logged_in_user']
     current_role = st.session_state['user_db'][current_user]["role"]
     
-    st.sidebar.success(مرحباً: {current_user})
-    st.sidebar.info(الصلاحية: {current_role})
+    st.sidebar.success(f"مرحباً: {current_user}")
+    st.sidebar.info(f"الصلاحية: {current_role}")
     
     if st.sidebar.button("تسجيل الخروج"):
         st.session_state['logged_in_user'] = None
@@ -82,7 +82,7 @@ else:
             if add_user_btn:
                 if new_username and new_password:
                     st.session_state['user_db'][new_username] = {"password": new_password, "role": new_role}
-                    st.sidebar.success(تمت إضافة المستخدم {new_username} بنجاح!)
+                    st.sidebar.success(f"تمت إضافة المستخدم {new_username} بنجاح!")
                 else:
                     st.sidebar.warning("يرجى ملء كافة الحقول.")
 
@@ -196,7 +196,7 @@ if uploaded_invoices and st.session_state['live_stock'] is not None:
                 
                 col_info, col_table = st.columns([1, 2])
                 with col_info:
-                    st.write(رقم الفاتورة: {inv_num})
+                    st.write(f"رقم الفاتورة: {inv_num}")
                     st.success("حالة الفاتورة: معالجة ومخصومة من المخزون")
                 
                 with col_table:
