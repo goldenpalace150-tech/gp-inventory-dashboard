@@ -28,31 +28,77 @@ st.title("القصر الذهبي - متتبع الجرد اليومي المب�
 if 'live_stock' not in st.session_state:
     st.session_state['live_stock'] = None
 if 'processed_invoices' not in st.session_state:
-    st.session_state['processed_invoices'] = {}  # Stores invoice_num -> impact dataframe
+    st.session_state['processed_invoices'] = {}
+
+# Default user database managed by Admin
+if 'user_db' not in st.session_state:
+    st.session_state['user_db'] = {
+        "admin": {"password": "123", "role": "مدير النظام (Admin)"},
+        "store": {"password": "123", "role": "أمين مخزن (Storekeeper)"}
+    }
+
+if 'logged_in_user' not in st.session_state:
+    st.session_state['logged_in_user'] = None
 
 # ==========================================
-# 0. USER ACCESS CONTROL (RBAC) SECTION
+# 🔐 SIDEBAR: AUTHENTICATION & USER MANAGEMENT
 # ==========================================
-st.sidebar.header("🔐 إدارة الصلاحيات والوصول")
-user_role = st.sidebar.selectbox(
-    "اختر مستوى الصلاحية:",
-    ["أمين مخزن (Storekeeper)", "مدير النظام (Admin)"]
-)
+st.sidebar.header("🔐 نظام تسجيل الدخول والصلاحيات")
 
-is_admin = (user_role == "مدير النظام (Admin)")
-
-if is_admin5 := is_admin:
-    st.sidebar.success("✅ صلاحيات كاملة مفعلة (Admin)")
+if st.session_state['logged_in_user'] is None:
+    # Login Form
+    with st.sidebar.form("login_form"):
+        username_input = st.text_input("اسم المستخدم")
+        password_input = st.text_input("كلمة المرور", type="password")
+        login_btn = st.form_submit_button("تسجيل الدخول")
+        
+        if login_btn:
+            if username_input in st.session_state['user_db'] and st.session_state['user_db'][username_input]["password"] == password_input:
+                st.session_state['logged_in_user'] = username_input
+                st.rerun()
+            else:
+                st.sidebar.error("اسم المستخدم أو كلمة المرور غير صحيحة.")
 else:
-    st.sidebar.info("🛡️ صلاحيات محدودة (رفع الفواتير والبحث فقط)")
+    current_user = st.session_state['logged_in_user']
+    current_role = st.session_state['user_db'][current_user]["role"]
+    
+    st.sidebar.success(مرحباً: {current_user})
+    st.sidebar.info(الصلاحية: {current_role})
+    
+    if st.sidebar.button("تسجيل الخروج"):
+        st.session_state['logged_in_user'] = None
+        st.rerun()
+
+    # Admin Panel to Add New Users and Passwords
+    if current_role == "مدير النظام (Admin)":
+        st.sidebar.divider()
+        st.sidebar.subheader("👥 إضافة مستخدم جديد")
+        with st.sidebar.form("new_user_form"):
+            new_username = st.text_input("اسم المستخدم الجديد")
+            new_password = st.text_input("كلمة المرور", type="password")
+            new_role = st.selectbox("الصلاحية", ["أمين مخزن (Storekeeper)", "مدير النظام (Admin)"])
+            add_user_btn = st.form_submit_button("إضافة المستخدم")
+            
+            if add_user_btn:
+                if new_username and new_password:
+                    st.session_state['user_db'][new_username] = {"password": new_password, "role": new_role}
+                    st.sidebar.success(تمت إضافة المستخدم {new_username} بنجاح!)
+                else:
+                    st.sidebar.warning("يرجى ملء كافة الحقول.")
+
+is_admin = (st.session_state['logged_in_user'] is not None and st.session_state['user_db'][st.session_state['logged_in_user']]["role"] == "مدير النظام (Admin)")
 
 st.divider()
 
+# Stop execution if user is not logged in
+if st.session_state['logged_in_user'] is None:
+    st.warning("⚠️ يرجى تسجيل الدخول من القائمة الجانبية لعرض لوحة التحكم.")
+    st.stop()
+
 # ==========================================
-# SIMULATED AI EXTRACTION (Using Invoice #6692)
+# SIMULATED AI EXTRACTION (Invoice #6692)
 # ==========================================
 def extract_invoice_data(uploaded_file):
-    # Matches the items from your actual delivery note (Invoice #6692)
     invoice_num = "فاتورة_6692"
     items = [
         {"رمز المادة": "014019", "اسم المادة": "مطري 2*2.5 مم كندان - Kadaan", "الكمية المخصومة": 1.0},
@@ -130,7 +176,7 @@ if uploaded_invoices and st.session_state['live_stock'] is not None:
                         qty_deduct = row['الكمية المخصومة']
                         global_live.loc[global_live['رمز المادة'] == code, 'الكمية'] -= qty_deduct
                         
-            st.success("✅ تم معالجة الفواتير وتحديث المخزون بنجاح دون إخفاء البيانات!")
+            st.success("✅ تم معالجة الفواتير وتحديث المخزون بنجاح!")
 
     st.divider()
 
@@ -150,7 +196,7 @@ if uploaded_invoices and st.session_state['live_stock'] is not None:
                 
                 col_info, col_table = st.columns([1, 2])
                 with col_info:
-                    st.write(f"**رقم الفاتورة:** {inv_num}")
+                    st.write(رقم الفاتورة: {inv_num})
                     st.success("حالة الفاتورة: معالجة ومخصومة من المخزون")
                 
                 with col_table:
@@ -180,5 +226,3 @@ if st.session_state['live_stock'] is not None:
             type="primary",
             use_container_width=True
         )
-    else:
-        st.sidebar.info("🔒 زر استخراج تقرير نهاية اليوم متاح فقط لمدير النظام (Admin).")
