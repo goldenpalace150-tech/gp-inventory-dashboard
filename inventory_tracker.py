@@ -28,7 +28,9 @@ st.title("القصر الذهبي - متتبع الجرد اليومي المب�
 if 'live_stock' not in st.session_state:
     st.session_state['live_stock'] = None
 if 'processed_invoices' not in st.session_state:
-    st.session_state['processed_invoices'] = {}
+    st.session_state['processed_invoices'] = {}  # inv_num -> impact df
+if 'invoice_raw_data' not in st.session_state:
+    st.session_state['invoice_raw_data'] = {}     # inv_num -> raw items dict list
 
 # Default user database managed by Admin
 if 'user_db' not in st.session_state:
@@ -46,7 +48,6 @@ if 'logged_in_user' not in st.session_state:
 st.sidebar.header("🔐 نظام تسجيل الدخول والصلاحيات")
 
 if st.session_state['logged_in_user'] is None:
-    # Login Form
     with st.sidebar.form("login_form"):
         username_input = st.text_input("اسم المستخدم")
         password_input = st.text_input("كلمة المرور", type="password")
@@ -69,7 +70,6 @@ else:
         st.session_state['logged_in_user'] = None
         st.rerun()
 
-    # Admin Panel to Add New Users and Passwords
     if current_role == "مدير النظام (Admin)":
         st.sidebar.divider()
         st.sidebar.subheader("👥 إضافة مستخدم جديد")
@@ -90,7 +90,6 @@ is_admin = (st.session_state['logged_in_user'] is not None and st.session_state[
 
 st.divider()
 
-# Stop execution if user is not logged in
 if st.session_state['logged_in_user'] is None:
     st.warning("⚠️ يرجى تسجيل الدخول من القائمة الجانبية لعرض لوحة التحكم.")
     st.stop()
@@ -122,7 +121,7 @@ def display_searchable_table(df, key_prefix):
         st.info("أدخل مصطلح بحث أعلاه لعرض المواد (تم إخفاء القائمة الكاملة لتوفير المساحة).")
 
 # ==========================================
-# 1. CONTROLS SECTION
+# 1. CONTROLS SECTION WITH LOGOS/ICONS
 # ==========================================
 st.subheader("لوحة التحكم")
 
@@ -130,7 +129,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     if is_admin:
-        uploaded_stock_report = st.file_uploader("1. رفع تقرير المخزون الأساسي (بداية اليوم)", type=["xlsx", "xls"])
+        uploaded_stock_report = st.file_uploader("📊 1. رفع تقرير المخزون الأساسي (بداية اليوم)", type=["xlsx", "xls"])
         if uploaded_stock_report is not None and st.session_state['live_stock'] is None:
             try:
                 df = pd.read_excel(uploaded_stock_report, header=1)
@@ -142,41 +141,54 @@ with col1:
             except Exception as e:
                 st.error("خطأ في قراءة ملف المخزون.")
     else:
-        st.info("🔒 رفع تقرير المخزون الأساسي مقتصر على مدير النظام (Admin).")
+        st.info("🔒 📊 رفع تقرير المخزون الأساسي مقتصر على مدير النظام (Admin).")
 
 with col2:
-    uploaded_invoices = st.file_uploader("2. رفع صور الفواتير / وصلات التسليم", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+    uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير / وصلات التسليم", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-# Processing invoices logic
+# Processing invoices logic with Duplicate & Adjustment detection
 if uploaded_invoices and st.session_state['live_stock'] is not None:
     if st.button("معالجة الفواتير وتحديث المخزون", type="primary", use_container_width=True):
-        with st.spinner("جاري استخراج البيانات ومقارنة المخزون..."):
+        with st.spinner("جاري استخراج البيانات والتحقق من التكرار أو التعديلات..."):
             for f in uploaded_invoices:
                 inv_num, items = extract_invoice_data(f)
+                extracted_df = pd.DataFrame(items)
+                extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
                 
-                if inv_num not in st.session_state['processed_invoices']:
-                    extracted_df = pd.DataFrame(items)
-                    extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
+                # Check if this invoice number was already processed before
+                if inv_num in st.session_state['processed_invoices']:
+                    st.warning(f"⚠️ تنبيه: الفاتورة ({inv_num}) مسجلة مسبقاً! يتم الآن تحديث التعديلات وحذف القديمة.")
                     
-                    # Capture state BEFORE deduction
-                    live_df = st.session_state['live_stock'].copy()
-                    live_df.rename(columns={'الكمية': 'الكمية قبل الفاتورة'}, inplace=True)
-                    
-                    # Merge and compute AFTER state
-                    merged_df = pd.merge(live_df, extracted_df[['رمز المادة', 'الكمية المخصومة']], on='رمز المادة', how='inner')
-                    merged_df['الكمية بعد الفاتورة'] = merged_df['الكمية قبل الفاتورة'] - merged_df['الكمية المخصومة']
-                    
-                    # Save impact report for this specific invoice
-                    st.session_state['processed_invoices'][inv_num] = merged_df
-                    
-                    # Update global live stock
-                    global_live = st.session_state['live_stock']
-                    for idx, row in extracted_df.iterrows():
-                        code = row['رمز المادة']
-                        qty_deduct = row['الكمية المخصومة']
-                        global_live.loc[global_live['رمز المادة'] == code, 'الكمية'] -= qty_deduct
+                    # 1. Revert previous deductions back into live stock
+                    old_items = st.session_state['invoice_raw_data'][inv_num]
+                    for old_row in old_items:
+                        code = old_row['رمز المادة']
+                        qty_to_restore = old_row['الكمية المخصومة']
+                        st.session_state['live_stock'].loc[
+                            st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
+                        ] += qty_to_restore
+                
+                # 2. Capture state BEFORE deduction for comparison
+                live_df = st.session_state['live_stock'].copy()
+                live_df.rename(columns={'الكمية': 'الكمية قبل الفاتورة'}, inplace=True)
+                
+                # 3. Merge and compute AFTER state for the new/adjusted invoice
+                merged_df = pd.merge(live_df, extracted_df[['رمز المادة', 'الكمية المخصومة']], on='رمز المادة', how='inner')
+                merged_df['الكمية بعد الفاتورة'] = merged_df['الكمية قبل الفاتورة'] - merged_df['الكمية المخصومة']
+                
+                # Save impact report and raw data
+                st.session_state['processed_invoices'][inv_num] = merged_df
+                st.session_state['invoice_raw_data'][inv_num] = items
+                
+                # 4. Apply new deductions to global live stock
+                for idx, row in extracted_df.iterrows():
+                    code = row['رمز المادة']
+                    qty_deduct = row['الكمية المخصومة']
+                    st.session_state['live_stock'].loc[
+                        st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
+                    ] -= qty_deduct
                         
-            st.success("✅ تم معالجة الفواتير وتحديث المخزون بنجاح!")
+            st.success("✅ تمت معالجة الفواتير وتحديث المخزون بنجاح (مع رصد التعديلات إن وجدت).")
 
     st.divider()
 
