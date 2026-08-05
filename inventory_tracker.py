@@ -2,21 +2,26 @@ import streamlit as st
 import pandas as pd
 from PIL import Image
 import io
+import json
 
 # ==========================================
-# PAGE CONFIGURATION & RTL STYLING
+# PAGE CONFIGURATION & MOBILE-FRIENDLY RTL STYLING
 # ==========================================
 st.set_page_config(page_title="متتبع الجرد - القصر الذهبي", layout="wide")
 
 st.markdown("""
     <style>
         .stApp { direction: rtl; }
-        .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+        .stTabs [data-baseweb="tab-list"] { gap: 8px; flex-wrap: wrap; }
         .stTabs [data-baseweb="tab"] {
             background-color: #f0f2f6;
             border-radius: 4px;
-            padding: 10px 20px;
+            padding: 8px 16px;
+            font-size: 14px;
         }
+        /* Mobile optimization for tables and containers */
+        table { width: 100% !important; font-size: 13px !important; }
+        .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -53,7 +58,7 @@ if st.session_state['logged_in_user'] is None:
     with st.sidebar.form("login_form"):
         username_input = st.text_input("اسم المستخدم")
         password_input = st.text_input("كلمة المرور", type="password")
-        login_btn = st.form_submit_button("تسجيل الدخول")
+        login_btn = st.form_submit_button("تسجيل الدخول", use_container_width=True)
         
         if login_btn:
             if username_input in st.session_state['user_db'] and st.session_state['user_db'][username_input]["password"] == password_input:
@@ -68,7 +73,7 @@ else:
     st.sidebar.success(f"مرحباً: {current_user}")
     st.sidebar.info(f"الصلاحية: {current_role}")
     
-    if st.sidebar.button("تسجيل الخروج"):
+    if st.sidebar.button("تسجيل الخروج", use_container_width=True):
         st.session_state['logged_in_user'] = None
         st.rerun()
 
@@ -79,7 +84,7 @@ else:
             new_username = st.text_input("اسم المستخدم الجديد")
             new_password = st.text_input("كلمة المرور", type="password")
             new_role = st.selectbox("الصلاحية", ["أمين مخزن (Storekeeper)", "مدير النظام (Admin)"])
-            add_user_btn = st.form_submit_button("إضافة المستخدم")
+            add_user_btn = st.form_submit_button("إضافة المستخدم", use_container_width=True)
             
             if add_user_btn:
                 if new_username and new_password:
@@ -112,7 +117,7 @@ def extract_invoice_data(uploaded_file):
 # HELPER: SEARCHABLE TABLE
 # ==========================================
 def display_searchable_table(df, key_prefix):
-    search_query = st.text_input("🔍 بحث في المخزون (برمز المادة أو اسم المادة):", key=f"search_{key_prefix}")
+    search_query = st.text_input("🔍 بحث في المخزون (بررمز المادة أو اسم المادة):", key=f"search_{key_prefix}")
     
     if search_query:
         mask = df['رمز المادة'].astype(str).str.contains(search_query, case=False, na=False) | \
@@ -120,12 +125,48 @@ def display_searchable_table(df, key_prefix):
         display_df = df[mask]
         st.markdown(display_df.to_html(index=False), unsafe_allow_html=True)
     else:
-        st.info("أدخل مصطلح بحث أعلاه لعرض المواد (تم إخفاء القائمة الكاملة لتوفير المساحة).")
+        st.info("أدخل مصطلح بحث أعلاه لعرض المواد (تم إخفاء القائمة الكاملة لتوفير المساحة وتناسب الشاشات).")
 
 # ==========================================
-# 1. CONTROLS SECTION WITH LOGOS/ICONS
+# 1. CONTROLS SECTION WITH ICONS & CAMERA
 # ==========================================
 st.subheader("لوحة التحكم")
+
+# Session State Backup & Restore (Save/Load progress)
+with st.expander("💾 حفظ أو استعادة حالة العمل (لتجنب فقدان البيانات عند الخروج)"):
+    col_save, col_load = st.columns(2)
+    with col_save:
+        if st.session_state['live_stock'] is not None:
+            state_data = {
+                "live_stock": st.session_state['live_stock'].to_json(orient='split'),
+                "processed_invoices": {k: v.to_json(orient='split') for k, v in st.session_state['processed_invoices'].items()},
+                "invoice_raw_data": st.session_state['invoice_raw_data'],
+                "file_to_invoice": st.session_state['file_to_invoice']
+            }
+            json_bytes = json.dumps(state_data, ensure_ascii=False).encode('utf-8')
+            st.download_button(
+                label="📥 تنزيل ملف حفظ الحالة الحالية",
+                data=json_bytes,
+                file_name="golden_palace_session_backup.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        else:
+            st.info("لا يوجد مخزون مفعل لحفظه حالياً.")
+            
+    with col_load:
+        uploaded_backup = st.file_uploader("📤 استعادة ملف حفظ سابق (.json)", type=["json"])
+        if uploaded_backup is not None:
+            try:
+                loaded_state = json.load(uploaded_backup)
+                st.session_state['live_stock'] = pd.read_json(loaded_state['live_stock'], orient='split')
+                st.session_state['processed_invoices'] = {k: pd.read_json(v, orient='split') for k, v in loaded_state['processed_invoices'].items()}
+                st.session_state['invoice_raw_data'] = loaded_state['invoice_raw_data']
+                st.session_state['file_to_invoice'] = loaded_state['file_to_invoice']
+                st.success("✅ تمت استعادة الحالة بنجاح!")
+                st.rerun()
+            except Exception as e:
+                st.error("ملف التخزين غير صالح.")
 
 col1, col2 = st.columns(2)
 
@@ -146,12 +187,22 @@ with col1:
         st.info("🔒 📊 رفع تقرير المخزون الأساسي مقتصر على مدير النظام (Admin).")
 
 with col2:
-    uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير / وصلات التسليم", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+    uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير (من الألبوم)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+
+# Direct Camera Option for Mobile / Desktop Webcams
+camera_image = st.camera_input("📸 أو التقاط صورة الفاتورة بالكاميرا مباشرة")
+
+# Combine uploaded files and camera capture into a unified list
+active_invoices_list = []
+if uploaded_invoices:
+    active_invoices_list.extend(uploaded_invoices)
+if camera_image:
+    active_invoices_list.append(camera_image)
 
 # ==========================================
-# AUTO-ROLLBACK LOGIC FOR DELETED/REMOVED FILES
+# AUTO-ROLLBACK LOGIC FOR DELETED FILES
 # ==========================================
-current_file_names = {f.name for f in uploaded_invoices} if uploaded_invoices else set()
+current_file_names = {f.name for f in active_invoices_list} if active_invoices_list else set()
 processed_file_names = list(st.session_state['file_to_invoice'].keys())
 removed_files = [fname for fname in processed_file_names if fname not in current_file_names]
 
@@ -160,7 +211,6 @@ if removed_files and st.session_state['live_stock'] is not None:
         inv_num = st.session_state['file_to_invoice'][fname]
         old_items = st.session_state['invoice_raw_data'].get(inv_num, [])
         
-        # Restore stock quantities back
         for old_row in old_items:
             code = old_row['رمز المادة']
             qty_to_restore = old_row['الكمية المخصومة']
@@ -168,29 +218,26 @@ if removed_files and st.session_state['live_stock'] is not None:
                 st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
             ] += qty_to_restore
             
-        # Clean up session memory
         st.session_state['processed_invoices'].pop(inv_num, None)
         st.session_state['invoice_raw_data'].pop(inv_num, None)
         st.session_state['file_to_invoice'].pop(fname, None)
         
-    st.success("🔄 تم رصد حذف الفاتورة من صندوق الرفع، وتمت إعادة الكميات إلى المخزون تلقائياً!")
+    st.success("🔄 تم رصد حذف الفاتورة، وتمت إعادة الكميات إلى المخزون تلقائياً!")
     st.rerun()
 
 # ==========================================
 # PROCESSING INVOICES LOGIC
 # ==========================================
-if uploaded_invoices and st.session_state['live_stock'] is not None:
+if active_invoices_list and st.session_state['live_stock'] is not None:
     if st.button("معالجة الفواتير وتحديث المخزون", type="primary", use_container_width=True):
         with st.spinner("جاري معالجة البيانات والتحقق من التكرار أو التعديلات..."):
-            for f in uploaded_invoices:
+            for f in active_invoices_list:
                 inv_num, items = extract_invoice_data(f)
                 extracted_df = pd.DataFrame(items)
                 extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
                 
-                # Link filename to invoice number
                 st.session_state['file_to_invoice'][f.name] = inv_num
                 
-                # Check if this invoice number was processed previously
                 old_items = st.session_state['invoice_raw_data'].get(inv_num, None)
                 
                 if old_items is not None:
@@ -211,19 +258,15 @@ if uploaded_invoices and st.session_state['live_stock'] is not None:
                                 st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
                             ] += qty_to_restore
 
-                # Capture state BEFORE deduction
                 live_df = st.session_state['live_stock'].copy()
                 live_df.rename(columns={'الكمية': 'الكمية قبل الفاتورة'}, inplace=True)
                 
-                # Merge and compute AFTER state
                 merged_df = pd.merge(live_df, extracted_df[['رمز المادة', 'الكمية المخصومة']], on='رمز المادة', how='inner')
                 merged_df['الكمية بعد الفاتورة'] = merged_df['الكمية قبل الفاتورة'] - merged_df['الكمية المخصومة']
                 
-                # Save impact report and raw data safely
                 st.session_state['processed_invoices'][inv_num] = merged_df
                 st.session_state['invoice_raw_data'][inv_num] = items
                 
-                # Apply new deductions to global live stock
                 for idx, row in extracted_df.iterrows():
                     code = row['رمز المادة']
                     qty_deduct = row['الكمية المخصومة']
