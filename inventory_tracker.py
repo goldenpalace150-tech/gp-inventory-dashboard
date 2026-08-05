@@ -13,6 +13,13 @@ st.markdown("""
     <style>
         .stApp {
             direction: rtl;
+            text-align: right;
+        }
+        /* Fix mobile text vertical stacking/wrapping issues */
+        h1, h2, h3, h4, p, span, label, div {
+            word-break: normal !important;
+            overflow-wrap: break-word !important;
+            text-align: right;
         }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; flex-wrap: wrap; }
         .stTabs [data-baseweb="tab"] {
