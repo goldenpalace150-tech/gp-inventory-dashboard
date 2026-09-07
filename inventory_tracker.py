@@ -5,6 +5,13 @@ import io
 import json
 import re
 import unicodedata
+import base64
+import hashlib
+import os
+import sqlite3
+import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 # ==========================================
@@ -12,11 +19,120 @@ from datetime import datetime
 # ==========================================
 st.set_page_config(page_title="متتبع الجرد - القصر الذهبي", layout="wide")
 
+
+def app_secret(section, key, default=""):
+    try:
+        return st.secrets.get(section, {}).get(key, default)
+    except Exception:
+        return default
+
+
+DATABASE_PATH = str(
+    app_secret("inventory", "database_path", "inventory_tracker.db")
+).strip()
+OPENAI_API_KEY = str(app_secret("openai", "api_key", "")).strip()
+OPENAI_VISION_MODEL = str(
+    app_secret("openai", "vision_model", "gpt-4.1-mini")
+).strip()
+
+
+def database_connection():
+    database_dir = os.path.dirname(os.path.abspath(DATABASE_PATH))
+    os.makedirs(database_dir, exist_ok=True)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=30)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_database():
+    with database_connection() as connection:
+        connection.executescript("""
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS stock_state (
+                item_key TEXT PRIMARY KEY,
+                item_code TEXT NOT NULL DEFAULT '',
+                item_name TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                match_key TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS movement_ledger (
+                movement_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                operation_fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                business_date TEXT NOT NULL,
+                username TEXT NOT NULL,
+                source TEXT NOT NULL,
+                movement_type TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                item_code TEXT NOT NULL DEFAULT '',
+                item_name TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                quantity_before REAL NOT NULL,
+                quantity_after REAL NOT NULL,
+                invoice_reference TEXT NOT NULL DEFAULT '',
+                without_invoice INTEGER NOT NULL DEFAULT 0,
+                delivery_note INTEGER NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT ''
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_movement_fingerprint
+                ON movement_ledger(operation_fingerprint, item_key, movement_type);
+            CREATE TABLE IF NOT EXISTS posted_invoices (
+                invoice_reference TEXT PRIMARY KEY,
+                image_hash TEXT NOT NULL UNIQUE,
+                operation_id TEXT NOT NULL,
+                posted_at TEXT NOT NULL,
+                username TEXT NOT NULL,
+                recognized_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS imported_movement_history (
+                row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_code TEXT,
+                item_name TEXT,
+                movement_date TEXT,
+                reference TEXT,
+                customer TEXT,
+                qty_in REAL,
+                qty_out REAL,
+                balance REAL,
+                username TEXT,
+                statement TEXT,
+                match_key TEXT
+            );
+            CREATE TABLE IF NOT EXISTS app_metadata (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS daily_closures (
+                business_date TEXT PRIMARY KEY,
+                closed_at TEXT NOT NULL,
+                username TEXT NOT NULL,
+                movement_count INTEGER NOT NULL,
+                total_in REAL NOT NULL,
+                total_out REAL NOT NULL,
+                no_invoice_count INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS daily_stock_snapshots (
+                business_date TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                item_code TEXT NOT NULL DEFAULT '',
+                item_name TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                match_key TEXT NOT NULL,
+                PRIMARY KEY (business_date, item_key)
+            );
+        """)
+
+
+initialize_database()
+
 st.markdown("""
     <style>
         .stApp {
             direction: rtl;
             text-align: right;
+            background: #f4f7fb;
         }
         /* Fix mobile text vertical stacking/wrapping issues */
         h1, h2, h3, h4, p, span, label, div {
@@ -24,19 +140,59 @@ st.markdown("""
             overflow-wrap: break-word !important;
             text-align: right;
         }
-        .stTabs [data-baseweb="tab-list"] { gap: 8px; flex-wrap: wrap; }
-        .stTabs [data-baseweb="tab"] {
-            background-color: #f0f2f6;
-            border-radius: 4px;
-            padding: 8px 16px;
-            font-size: 14px;
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 6px;
+            flex-wrap: wrap;
+            background: white;
+            border: 1px solid #dce5f0;
+            border-radius: 14px;
+            padding: 5px;
         }
+        .stTabs [data-baseweb="tab"] {
+            background-color: transparent;
+            border-radius: 10px;
+            padding: 10px 18px;
+            font-size: 14px;
+            min-height: 44px;
+        }
+        .stTabs [aria-selected="true"] { background: #eaf1ff !important; color: #1d4ed8 !important; }
         table { width: 100% !important; font-size: 13px !important; }
-        .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+        .block-container { max-width: 1450px; padding-top: 1.2rem; padding-bottom: 2rem; }
+        div[data-testid="stMetric"] {
+            background: white;
+            border: 1px solid #dce5f0;
+            border-radius: 14px;
+            padding: 14px;
+            box-shadow: 0 4px 14px rgba(15, 23, 42, .04);
+        }
+        div[data-testid="stForm"], div[data-testid="stExpander"] {
+            background: white;
+            border: 1px solid #dce5f0 !important;
+            border-radius: 14px !important;
+        }
+        .gp-hero {
+            background: linear-gradient(115deg, #14264a, #245bd8);
+            color: white;
+            padding: 20px 24px;
+            border-radius: 18px;
+            margin-bottom: 14px;
+            box-shadow: 0 10px 28px rgba(30, 64, 175, .18);
+        }
+        .gp-hero-title { font-size: 25px; font-weight: 800; }
+        .gp-hero-sub { opacity: .82; margin-top: 4px; }
+        @media (max-width: 700px) {
+            .block-container { padding-left: 10px; padding-right: 10px; }
+            .stTabs [data-baseweb="tab"] { padding: 8px 9px; font-size: 12px; }
+            .gp-hero { padding: 16px; }
+        }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("القصر الذهبي - متتبع الجرد اليومي المباشر")
+st.markdown(
+    '<div class="gp-hero"><div class="gp-hero-title">القصر الذهبي · إدارة المخزون</div>'
+    '<div class="gp-hero-sub">حركة فورية، تدقيق الفواتير، إعادة الطلب وتقارير نهاية اليوم</div></div>',
+    unsafe_allow_html=True,
+)
 
 # ==========================================
 # SESSION STATE INITIALIZATION
@@ -55,6 +211,12 @@ if 'manual_movements' not in st.session_state:
     st.session_state['manual_movements'] = []
 if 'manual_movement_flash' not in st.session_state:
     st.session_state['manual_movement_flash'] = None
+if 'recognized_invoices' not in st.session_state:
+    st.session_state['recognized_invoices'] = {}
+if 'manual_operation_nonce' not in st.session_state:
+    st.session_state['manual_operation_nonce'] = str(uuid.uuid4())
+if 'movement_file_hash' not in st.session_state:
+    st.session_state['movement_file_hash'] = None
 
 # Default user database managed by Admin
 if 'user_db' not in st.session_state:
@@ -89,6 +251,8 @@ else:
     
     st.sidebar.success(f"مرحباً: {current_user}")
     st.sidebar.info(f"الصلاحية: {current_role}")
+    st.sidebar.success("● الحفظ التلقائي للحركات فعال")
+    st.sidebar.caption("يبقى تسجيل الدخول فعالاً حتى تضغط تسجيل الخروج.")
     
     if st.sidebar.button("تسجيل الخروج", use_container_width=True):
         st.session_state['logged_in_user'] = None
@@ -119,16 +283,106 @@ if st.session_state['logged_in_user'] is None:
     st.stop()
 
 # ==========================================
-# SIMULATED AI EXTRACTION (Invoice #6692)
+# REAL INVOICE PHOTO RECOGNITION
 # ==========================================
 def extract_invoice_data(uploaded_file):
-    invoice_num = "فاتورة_6692"
-    items = [
-        {"رمز المادة": "014019", "اسم المادة": "مطري 2*2.5 مم كندان - Kadaan", "الكمية المخصومة": 1.0},
-        {"رمز المادة": "0113142", "اسم المادة": "فيش كبير - شوكو", "الكمية المخصومة": 1.0},
-        {"رمز المادة": "0124087", "اسم المادة": "قاطع مزدوج 63 امبير SSC-ONE.DC", "الكمية المخصومة": 1.0}
-    ]
-    return invoice_num, items
+    """Recognize the actual invoice image and return strict structured data."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "أضف openai.api_key إلى Streamlit Secrets لتفعيل قراءة صور الفواتير."
+        )
+    image = Image.open(io.BytesIO(uploaded_file.getvalue())).convert("RGB")
+    image.thumbnail((2200, 2200))
+    optimized = io.BytesIO()
+    image.save(optimized, format="JPEG", quality=90, optimize=True)
+    image_b64 = base64.b64encode(optimized.getvalue()).decode("ascii")
+
+    invoice_schema = {
+        "type": "object",
+        "properties": {
+            "invoice_number": {"type": "string"},
+            "movement_type": {"type": "string", "enum": ["OUT", "IN"]},
+            "confidence": {"type": "number"},
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item_code": {"type": "string"},
+                        "item_name": {"type": "string"},
+                        "quantity": {"type": "number"},
+                    },
+                    "required": ["item_code", "item_name", "quantity"],
+                    "additionalProperties": False,
+                },
+            },
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "invoice_number", "movement_type", "confidence", "items", "warnings"
+        ],
+        "additionalProperties": False,
+    }
+    prompt = (
+        "اقرأ صورة فاتورة مخزون عربية أو إنجليزية بدقة. استخرج رقم الفاتورة، "
+        "وحدد OUT للمبيعات/الإخراج وIN للمشتريات/المرتجع الداخل، ثم استخرج كل "
+        "رمز مادة واسمها والكمية فقط. لا تخمن رمزاً غير ظاهر؛ اتركه فارغاً "
+        "وأضف تحذيراً. لا تجمع سطوراً مختلفة ولا تستخدم السعر ككمية."
+    )
+    payload = {
+        "model": OPENAI_VISION_MODEL,
+        "input": [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{image_b64}",
+                    "detail": "high",
+                },
+            ],
+        }],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "inventory_invoice",
+                "strict": True,
+                "schema": invoice_schema,
+            }
+        },
+        "max_output_tokens": 3000,
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"فشل التعرف على الفاتورة (HTTP {error.code}): {detail}")
+    except Exception as error:
+        raise RuntimeError(f"تعذر الاتصال بخدمة قراءة الفاتورة: {error}")
+
+    output_text = ""
+    for output_item in response_data.get("output", []):
+        if output_item.get("type") != "message":
+            continue
+        for content_item in output_item.get("content", []):
+            if content_item.get("type") == "output_text":
+                output_text += content_item.get("text", "")
+    if not output_text:
+        raise RuntimeError("لم تُرجع خدمة التعرف بيانات قابلة للقراءة.")
+    recognized = json.loads(output_text)
+    recognized["image_hash"] = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+    recognized["source_name"] = getattr(uploaded_file, "name", "invoice-photo.jpg")
+    return recognized
 
 
 def normalize_item_name(value):
@@ -189,7 +443,21 @@ def read_stock_report(file_bytes):
                 & result["اسم المادة"].astype(str).str.strip().ne("")
             ].copy()
             result["مفتاح المطابقة"] = result["اسم المادة"].map(normalize_item_name)
-            return result.reset_index(drop=True)
+            result = result.reset_index(drop=True)
+            base_keys = result.apply(
+                lambda row: (
+                    f"CODE:{normalize_item_code(row['رمز المادة'])}"
+                    if normalize_item_code(row['رمز المادة'])
+                    else f"NAME:{row['مفتاح المطابقة']}"
+                ),
+                axis=1,
+            )
+            duplicate_number = base_keys.groupby(base_keys).cumcount()
+            result["مفتاح المخزون"] = [
+                base_key if number == 0 else f"{base_key}#{number + 1}"
+                for base_key, number in zip(base_keys, duplicate_number)
+            ]
+            return result
     raise ValueError("لم يتم العثور على أعمدة اسم المادة والكمية في تقرير الجرد.")
 
 
@@ -320,6 +588,452 @@ def build_inventory_analysis(stock_df, movement_df, lead_days, safety_days, slow
         ["حالة الطلب", "إجمالي الإخراج"], ascending=[True, False]
     ).reset_index(drop=True)
 
+
+def stock_item_key(row):
+    persisted_key = str(row.get("مفتاح المخزون", "") or "").strip()
+    if persisted_key:
+        return persisted_key
+    code = normalize_item_code(row.get("رمز المادة", ""))
+    return f"CODE:{code}" if code else f"NAME:{normalize_item_name(row.get('اسم المادة', ''))}"
+
+
+def ensure_unique_stock_keys(stock_df):
+    if "مفتاح المطابقة" not in stock_df.columns:
+        stock_df["مفتاح المطابقة"] = stock_df["اسم المادة"].map(normalize_item_name)
+    existing = stock_df.get("مفتاح المخزون")
+    if existing is not None and existing.notna().all() and existing.is_unique:
+        return stock_df
+    base_keys = stock_df.apply(
+        lambda row: (
+            f"CODE:{normalize_item_code(row.get('رمز المادة', ''))}"
+            if normalize_item_code(row.get("رمز المادة", ""))
+            else f"NAME:{normalize_item_name(row.get('اسم المادة', ''))}"
+        ),
+        axis=1,
+    )
+    duplicate_number = base_keys.groupby(base_keys).cumcount()
+    stock_df["مفتاح المخزون"] = [
+        base_key if number == 0 else f"{base_key}#{number + 1}"
+        for base_key, number in zip(base_keys, duplicate_number)
+    ]
+    return stock_df
+
+
+def save_stock_state(stock_df):
+    """Persist the complete current stock snapshot atomically."""
+    ensure_unique_stock_keys(stock_df)
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = []
+    for _, row in stock_df.iterrows():
+        rows.append((
+            stock_item_key(row),
+            normalize_item_code(row.get("رمز المادة", "")),
+            str(row.get("اسم المادة", "") or ""),
+            float(row.get("الكمية", 0) or 0),
+            str(row.get("مفتاح المطابقة", "") or normalize_item_name(row.get("اسم المادة", ""))),
+            now_text,
+        ))
+    with database_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM stock_state")
+        connection.executemany(
+            """INSERT INTO stock_state
+               (item_key, item_code, item_name, quantity, match_key, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO app_metadata(meta_key, meta_value) VALUES (?, ?)",
+            ("stock_saved_at", now_text),
+        )
+
+
+def load_stock_state():
+    with database_connection() as connection:
+        rows = connection.execute(
+            "SELECT item_key, item_code, item_name, quantity, match_key FROM stock_state ORDER BY item_name"
+        ).fetchall()
+    if not rows:
+        return None
+    return pd.DataFrame([
+        {
+            "رمز المادة": row["item_code"],
+            "اسم المادة": row["item_name"],
+            "الكمية": row["quantity"],
+            "مفتاح المطابقة": row["match_key"],
+            "مفتاح المخزون": row["item_key"],
+        }
+        for row in rows
+    ])
+
+
+def save_imported_movement_history(movement_df):
+    rows = [(
+        str(row.get("رمز المادة", "") or ""),
+        str(row.get("اسم المادة", "") or ""),
+        pd.Timestamp(row["التاريخ"]).strftime("%Y-%m-%d %H:%M:%S"),
+        str(row.get("المرجع", "") or ""),
+        str(row.get("الزبون", "") or ""),
+        float(row.get("إدخال", 0) or 0),
+        float(row.get("إخراج", 0) or 0),
+        None if pd.isna(row.get("الرصيد")) else float(row.get("الرصيد")),
+        str(row.get("المستخدم", "") or ""),
+        str(row.get("بيان", "") or ""),
+        str(row.get("مفتاح المطابقة", "") or ""),
+    ) for _, row in movement_df.iterrows()]
+    with database_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM imported_movement_history")
+        connection.executemany(
+            """INSERT INTO imported_movement_history
+               (item_code, item_name, movement_date, reference, customer,
+                qty_in, qty_out, balance, username, statement, match_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+
+
+def load_imported_movement_history():
+    with database_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM imported_movement_history ORDER BY movement_date"
+        ).fetchall()
+    if not rows:
+        return None
+    return pd.DataFrame([{
+        "رمز المادة": row["item_code"],
+        "اسم المادة": row["item_name"],
+        "التاريخ": pd.to_datetime(row["movement_date"]),
+        "المرجع": row["reference"],
+        "الزبون": row["customer"],
+        "إدخال": row["qty_in"],
+        "إخراج": row["qty_out"],
+        "الرصيد": row["balance"],
+        "المستخدم": row["username"],
+        "بيان": row["statement"],
+        "مفتاح المطابقة": row["match_key"],
+    } for row in rows])
+
+
+def verify_operation_password(password):
+    expected = st.session_state['user_db'][current_user]["password"]
+    return bool(password) and password == expected
+
+
+def load_manual_movements():
+    with database_connection() as connection:
+        rows = connection.execute(
+            """SELECT * FROM movement_ledger
+               WHERE source = 'MANUAL' ORDER BY created_at DESC"""
+        ).fetchall()
+    return [{
+        "التاريخ": row["created_at"],
+        "المستخدم": row["username"],
+        "نوع الحركة": row["movement_type"],
+        "رمز المادة": row["item_code"],
+        "اسم المادة": row["item_name"],
+        "الكمية": row["quantity"],
+        "الكمية قبل الحركة": row["quantity_before"],
+        "الكمية بعد الحركة": row["quantity_after"],
+        "رقم الفاتورة / المرجع": row["invoice_reference"],
+        "بدون فاتورة": "نعم" if row["without_invoice"] else "لا",
+        "وصل تسليم": "نعم" if row["delivery_note"] else "لا",
+        "السبب": row["reason"],
+    } for row in rows]
+
+
+def movement_exists(operation_fingerprint):
+    with database_connection() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM movement_ledger WHERE operation_fingerprint = ? LIMIT 1",
+            (operation_fingerprint,),
+        ).fetchone()
+    return row is not None
+
+
+def post_stock_operation(stock_df, changes, operation_meta, invoice_payload=None):
+    """Commit ledger rows and stock balances together; duplicate requests are rejected."""
+    operation_id = operation_meta.get("operation_id") or str(uuid.uuid4())
+    fingerprint = operation_meta["fingerprint"]
+    if movement_exists(fingerprint):
+        raise ValueError("تم تنفيذ هذه العملية سابقاً؛ تم منع التكرار.")
+
+    working_stock = stock_df.copy()
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ledger_rows = []
+    for line_number, change in enumerate(changes, start=1):
+        row_index = int(change["row_index"])
+        movement_type = change["movement_type"]
+        quantity = float(change["quantity"])
+        before_qty = float(working_stock.at[row_index, "الكمية"])
+        after_qty = before_qty + quantity if movement_type == "IN" else before_qty - quantity
+        if quantity <= 0:
+            raise ValueError("يجب أن تكون جميع الكميات أكبر من صفر.")
+        if movement_type == "OUT" and after_qty < 0:
+            raise ValueError(
+                f"رصيد {working_stock.at[row_index, 'اسم المادة']} غير كافٍ."
+            )
+        working_stock.at[row_index, "الكمية"] = after_qty
+        item_row = working_stock.loc[row_index]
+        item_key = stock_item_key(item_row)
+        ledger_rows.append((
+            str(uuid.uuid4()), operation_id, fingerprint,
+            created_at, created_at[:10], operation_meta["username"],
+            operation_meta["source"], movement_type, item_key,
+            normalize_item_code(item_row.get("رمز المادة", "")),
+            str(item_row.get("اسم المادة", "")), quantity,
+            before_qty, after_qty,
+            str(operation_meta.get("invoice_reference", "") or ""),
+            int(bool(operation_meta.get("without_invoice"))),
+            int(bool(operation_meta.get("delivery_note"))),
+            str(operation_meta.get("reason", "") or ""),
+        ))
+
+    with database_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM movement_ledger WHERE operation_fingerprint = ? LIMIT 1",
+            (fingerprint,),
+        ).fetchone():
+            raise ValueError("تم تنفيذ هذه العملية سابقاً؛ تم منع التكرار.")
+        connection.executemany(
+            """INSERT INTO movement_ledger
+               (movement_id, operation_id, operation_fingerprint, created_at,
+                business_date, username, source, movement_type, item_key,
+                item_code, item_name, quantity, quantity_before, quantity_after,
+                invoice_reference, without_invoice, delivery_note, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ledger_rows,
+        )
+        for change in changes:
+            saved_row = working_stock.loc[int(change["row_index"])]
+            connection.execute(
+                """INSERT INTO stock_state
+                   (item_key, item_code, item_name, quantity, match_key, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(item_key) DO UPDATE SET
+                     item_code = excluded.item_code,
+                     item_name = excluded.item_name,
+                     quantity = excluded.quantity,
+                     match_key = excluded.match_key,
+                     updated_at = excluded.updated_at""",
+                (
+                    stock_item_key(saved_row),
+                    normalize_item_code(saved_row.get("رمز المادة", "")),
+                    str(saved_row.get("اسم المادة", "")),
+                    float(saved_row.get("الكمية", 0)),
+                    str(saved_row.get("مفتاح المطابقة", "")),
+                    created_at,
+                ),
+            )
+        if invoice_payload is not None:
+            connection.execute(
+                """INSERT INTO posted_invoices
+                   (invoice_reference, image_hash, operation_id, posted_at,
+                    username, recognized_json) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    operation_meta["invoice_reference"],
+                    invoice_payload["image_hash"], operation_id, created_at,
+                    operation_meta["username"],
+                    json.dumps(invoice_payload, ensure_ascii=False),
+                ),
+            )
+    return working_stock, ledger_rows
+
+
+def invoice_already_posted(invoice_reference, image_hash):
+    with database_connection() as connection:
+        row = connection.execute(
+            """SELECT invoice_reference FROM posted_invoices
+               WHERE invoice_reference = ? OR image_hash = ? LIMIT 1""",
+            (invoice_reference, image_hash),
+        ).fetchone()
+    return row["invoice_reference"] if row else None
+
+
+def ledger_for_date(report_date):
+    date_text = report_date.strftime("%Y-%m-%d")
+    with database_connection() as connection:
+        rows = connection.execute(
+            """SELECT * FROM movement_ledger
+               WHERE business_date = ? ORDER BY created_at, movement_id""",
+            (date_text,),
+        ).fetchall()
+    return pd.DataFrame([dict(row) for row in rows])
+
+
+def ledger_as_movement_history():
+    with database_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM movement_ledger ORDER BY created_at"
+        ).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([{
+        "رمز المادة": row["item_code"],
+        "اسم المادة": row["item_name"],
+        "التاريخ": pd.to_datetime(row["created_at"]),
+        "المرجع": row["invoice_reference"],
+        "الزبون": "",
+        "إدخال": row["quantity"] if row["movement_type"] == "IN" else 0,
+        "إخراج": row["quantity"] if row["movement_type"] == "OUT" else 0,
+        "الرصيد": row["quantity_after"],
+        "المستخدم": row["username"],
+        "بيان": row["reason"],
+        "مفتاح المطابقة": normalize_item_name(row["item_name"]),
+    } for row in rows])
+
+
+def close_business_day(report_date, username, stock_df):
+    ledger = ledger_for_date(report_date)
+    total_in = float(ledger.loc[ledger["movement_type"] == "IN", "quantity"].sum()) if not ledger.empty else 0
+    total_out = float(ledger.loc[ledger["movement_type"] == "OUT", "quantity"].sum()) if not ledger.empty else 0
+    no_invoice_count = int(ledger["without_invoice"].sum()) if not ledger.empty else 0
+    with database_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """INSERT OR REPLACE INTO daily_closures
+               (business_date, closed_at, username, movement_count,
+                total_in, total_out, no_invoice_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                report_date.strftime("%Y-%m-%d"),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                username, len(ledger), total_in, total_out, no_invoice_count,
+            ),
+        )
+        date_text = report_date.strftime("%Y-%m-%d")
+        connection.execute(
+            "DELETE FROM daily_stock_snapshots WHERE business_date = ?",
+            (date_text,),
+        )
+        connection.executemany(
+            """INSERT INTO daily_stock_snapshots
+               (business_date, item_key, item_code, item_name, quantity, match_key)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [(
+                date_text,
+                stock_item_key(row),
+                normalize_item_code(row.get("رمز المادة", "")),
+                str(row.get("اسم المادة", "")),
+                float(row.get("الكمية", 0)),
+                str(row.get("مفتاح المطابقة", "")),
+            ) for _, row in stock_df.iterrows()],
+        )
+    return ledger
+
+
+def load_daily_stock_snapshot(report_date):
+    with database_connection() as connection:
+        rows = connection.execute(
+            """SELECT * FROM daily_stock_snapshots
+               WHERE business_date = ? ORDER BY item_name""",
+            (report_date.strftime("%Y-%m-%d"),),
+        ).fetchall()
+    if not rows:
+        return None
+    return pd.DataFrame([{
+        "رمز المادة": row["item_code"],
+        "اسم المادة": row["item_name"],
+        "الكمية": row["quantity"],
+        "مفتاح المطابقة": row["match_key"],
+        "مفتاح المخزون": row["item_key"],
+    } for row in rows])
+
+
+def daily_closure_for_date(report_date):
+    with database_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM daily_closures WHERE business_date = ?",
+            (report_date.strftime("%Y-%m-%d"),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def build_end_of_day_report(report_date, stock_df, analysis_df):
+    ledger = ledger_for_date(report_date)
+    total_in = float(ledger.loc[ledger["movement_type"] == "IN", "quantity"].sum()) if not ledger.empty else 0
+    total_out = float(ledger.loc[ledger["movement_type"] == "OUT", "quantity"].sum()) if not ledger.empty else 0
+    no_invoice_count = int(ledger["without_invoice"].sum()) if not ledger.empty else 0
+    affected = pd.DataFrame()
+    if not ledger.empty:
+        affected = ledger.groupby(
+            ["item_key", "item_code", "item_name"], as_index=False
+        ).agg(
+            **{
+                "الرصيد الافتتاحي": ("quantity_before", "first"),
+                "إجمالي الإدخال": (
+                    "quantity",
+                    lambda values: float(values[ledger.loc[values.index, "movement_type"] == "IN"].sum()),
+                ),
+                "إجمالي الإخراج": (
+                    "quantity",
+                    lambda values: float(values[ledger.loc[values.index, "movement_type"] == "OUT"].sum()),
+                ),
+                "الرصيد الختامي": ("quantity_after", "last"),
+            }
+        ).rename(columns={
+            "item_code": "رمز المادة",
+            "item_name": "اسم المادة",
+        })
+
+    summary = pd.DataFrame([
+        {"البيان": "تاريخ التقرير", "القيمة": report_date.strftime("%Y-%m-%d")},
+        {"البيان": "عدد الحركات", "القيمة": len(ledger)},
+        {"البيان": "إجمالي الإدخال", "القيمة": total_in},
+        {"البيان": "إجمالي الإخراج", "القيمة": total_out},
+        {"البيان": "حركات بدون فاتورة", "القيمة": no_invoice_count},
+        {"البيان": "وقت إنشاء التقرير", "القيمة": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    ])
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        summary.to_excel(writer, index=False, sheet_name="Daily_Summary")
+        ledger.to_excel(writer, index=False, sheet_name="Daily_Movements")
+        affected.drop(columns=["item_key"], errors="ignore").to_excel(
+            writer, index=False, sheet_name="Affected_Items"
+        )
+        stock_df.drop(
+            columns=["مفتاح المطابقة", "مفتاح المخزون"], errors="ignore"
+        ).to_excel(
+            writer, index=False, sheet_name="Closing_Stock"
+        )
+        if not ledger.empty:
+            ledger[ledger["without_invoice"] == 1].to_excel(
+                writer, index=False, sheet_name="No_Invoice_Alerts"
+            )
+        if analysis_df is not None and not analysis_df.empty:
+            clean_analysis = analysis_df.drop(
+                columns=["مفتاح المطابقة", "رمز الحركة", "اسم الحركة"],
+                errors="ignore",
+            )
+            clean_analysis[clean_analysis["حالة الطلب"] == "إعادة طلب"].to_excel(
+                writer, index=False, sheet_name="Reorder_List"
+            )
+            clean_analysis[
+                clean_analysis["اقتراح التصريف"] == "مرشح للتصريف"
+            ].to_excel(writer, index=False, sheet_name="Slow_Clearance")
+    return output.getvalue(), ledger, affected
+
+
+# Restore the last committed state automatically after app/server reruns.
+if st.session_state['live_stock'] is None:
+    st.session_state['live_stock'] = load_stock_state()
+if st.session_state['movement_history'] is None:
+    st.session_state['movement_history'] = load_imported_movement_history()
+st.session_state['manual_movements'] = load_manual_movements()
+
+if st.session_state['live_stock'] is not None:
+    today_ledger = ledger_for_date(datetime.now().date())
+    total_items = len(st.session_state['live_stock'])
+    positive_items = int((st.session_state['live_stock']['الكمية'] > 0).sum())
+    today_operations = len(today_ledger)
+    today_no_invoice = int(today_ledger['without_invoice'].sum()) if not today_ledger.empty else 0
+    dash1, dash2, dash3, dash4 = st.columns(4)
+    dash1.metric("إجمالي المواد", f"{total_items:,}")
+    dash2.metric("مواد برصيد موجب", f"{positive_items:,}")
+    dash3.metric("حركات اليوم", f"{today_operations:,}")
+    dash4.metric("تنبيهات بلا فاتورة", f"{today_no_invoice:,}")
+
 # ==========================================
 # HELPER: SEARCHABLE TABLE
 # ==========================================
@@ -329,7 +1043,9 @@ def display_searchable_table(df, key_prefix):
     if search_query:
         mask = df['رمز المادة'].astype(str).str.contains(search_query, case=False, na=False) | \
                df['اسم المادة'].astype(str).str.contains(search_query, case=False, na=False)
-        display_df = df[mask]
+        display_df = df[mask].drop(
+            columns=['مفتاح المطابقة', 'مفتاح المخزون'], errors='ignore'
+        )
         st.markdown(display_df.to_html(index=False), unsafe_allow_html=True)
     else:
         st.info("أدخل مصطلح بحث أعلاه لعرض المواد (تم إخفاء القائمة الكاملة لتوفير المساحة وتناسب الشاشات).")
@@ -385,10 +1101,13 @@ with st.expander("💾 حفظ أو استعادة حالة العمل (لتجن�
                     st.session_state['movement_history']['التاريخ'] = pd.to_datetime(
                         st.session_state['movement_history']['التاريخ'], errors='coerce'
                     )
-                st.session_state['manual_movements'] = loaded_state.get(
-                    'manual_movements', []
-                )
-                st.success("✅ تمت استعادة الحالة بنجاح!")
+                save_stock_state(st.session_state['live_stock'])
+                if st.session_state['movement_history'] is not None:
+                    save_imported_movement_history(
+                        st.session_state['movement_history']
+                    )
+                st.session_state['manual_movements'] = load_manual_movements()
+                st.success("✅ تمت استعادة الحالة وحفظها تلقائياً!")
                 st.rerun()
             except Exception as e:
                 st.error("ملف التخزين غير صالح.")
@@ -398,15 +1117,39 @@ col1, col2, col3 = st.columns(3)
 with col1:
     if is_admin:
         uploaded_stock_report = st.file_uploader("📊 1. رفع تقرير المخزون الأساسي (بداية اليوم)", type=["xlsx", "xls"])
-        if uploaded_stock_report is not None and st.session_state['live_stock'] is None:
+        if uploaded_stock_report is not None:
             try:
                 df = read_stock_report(uploaded_stock_report.getvalue())
                 if st.session_state['movement_history'] is not None:
                     df = enrich_stock_codes(df, st.session_state['movement_history'])
-                st.session_state['live_stock'] = df
-                st.success("✅ تم تحميل المخزون الأساسي بنجاح.")
+                if st.session_state['live_stock'] is None:
+                    st.session_state['live_stock'] = df
+                    save_stock_state(df)
+                    st.success("✅ تم تحميل المخزون الأساسي وحفظه تلقائياً.")
+                    st.rerun()
+                else:
+                    st.warning(
+                        "يوجد رصيد محفوظ. اعتماد الملف سيستبدل الرصيد الحالي كنقطة بداية جديدة."
+                    )
+                    replace_stock_password = st.text_input(
+                        "كلمة المرور لاعتماد رصيد بداية جديد",
+                        type="password",
+                        key="replace_stock_password",
+                    )
+                    if st.button(
+                        "اعتماد ملف الجرد كبداية جديدة",
+                        use_container_width=True,
+                        key="replace_stock_button",
+                    ):
+                        if not verify_operation_password(replace_stock_password):
+                            st.error("كلمة المرور غير صحيحة؛ لم يتم استبدال الرصيد.")
+                        else:
+                            st.session_state['live_stock'] = df
+                            save_stock_state(df)
+                            st.success("تم حفظ رصيد البداية الجديد.")
+                            st.rerun()
             except Exception as e:
-                st.error("خطأ في قراءة ملف المخزون.")
+                st.error(f"خطأ في قراءة ملف المخزون: {e}")
     else:
         st.info("🔒 📊 رفع تقرير المخزون الأساسي مقتصر على مدير النظام (Admin).")
 
@@ -421,13 +1164,23 @@ with col3:
     )
     if uploaded_movement_report is not None:
         try:
-            movement_df = read_movement_report(uploaded_movement_report.getvalue())
-            st.session_state['movement_history'] = movement_df
-            if st.session_state['live_stock'] is not None:
-                st.session_state['live_stock'] = enrich_stock_codes(
-                    st.session_state['live_stock'], movement_df
+            movement_bytes = uploaded_movement_report.getvalue()
+            movement_hash = hashlib.sha256(movement_bytes).hexdigest()
+            if st.session_state['movement_file_hash'] != movement_hash:
+                movement_df = read_movement_report(movement_bytes)
+                st.session_state['movement_history'] = movement_df
+                if st.session_state['live_stock'] is not None:
+                    st.session_state['live_stock'] = enrich_stock_codes(
+                        st.session_state['live_stock'], movement_df
+                    )
+                    save_stock_state(st.session_state['live_stock'])
+                save_imported_movement_history(movement_df)
+                st.session_state['movement_file_hash'] = movement_hash
+                st.success(
+                    f"✅ تم تحميل وحفظ {len(movement_df):,} حركة مخزون للتحليل."
                 )
-            st.success(f"✅ تم تحميل {len(movement_df):,} حركة مخزون للتحليل.")
+            else:
+                st.caption("تقرير الحركة محفوظ ومحدّث.")
         except Exception as movement_error:
             st.error(f"تعذر قراءة تقرير الحركة: {movement_error}")
 
@@ -445,139 +1198,196 @@ if camera_image:
     active_invoices_list.append(camera_image)
 
 # ==========================================
-# AUTO-ROLLBACK LOGIC FOR DELETED FILES
+# REAL INVOICE REVIEW & PASSWORD-AUTHORIZED POSTING
 # ==========================================
-current_file_names = {f.name for f in active_invoices_list} if active_invoices_list else set()
-processed_file_names = list(st.session_state['file_to_invoice'].keys())
-removed_files = [fname for fname in processed_file_names if fname not in current_file_names]
+invoice_flash = st.session_state.pop("invoice_flash", None)
+if invoice_flash:
+    st.success(invoice_flash)
 
-if removed_files and st.session_state['live_stock'] is not None:
-    for fname in removed_files:
-        inv_num = st.session_state['file_to_invoice'][fname]
-        old_items = st.session_state['invoice_raw_data'].get(inv_num, [])
-        
-        for old_row in old_items:
-            code = old_row['رمز المادة']
-            qty_to_restore = old_row['الكمية المخصومة']
-            st.session_state['live_stock'].loc[
-                st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
-            ] += qty_to_restore
-            
-        st.session_state['processed_invoices'].pop(inv_num, None)
-        st.session_state['invoice_raw_data'].pop(inv_num, None)
-        st.session_state['file_to_invoice'].pop(fname, None)
-        
-    st.success("🔄 تم رصد حذف الفاتورة، وتمت إعادة الكميات إلى المخزون تلقائياً!")
-    st.rerun()
-
-# ==========================================
-# PROCESSING INVOICES LOGIC
-# ==========================================
 if active_invoices_list:
-    if st.button("معالجة الفواتير وتحديث المخزون", type="primary", use_container_width=True):
-        if st.session_state['live_stock'] is None:
-            st.error("❌ خطأ: يجب عليك رفع تقرير المخزون الأساسي (Excel) أولاً قبل معالجة أي فواتير!")
-        else:
-            with st.spinner("جاري معالجة البيانات والتحقق من التكرار أو التعديلات..."):
-                for f in active_invoices_list:
-                    inv_num, items = extract_invoice_data(f)
-                    extracted_df = pd.DataFrame(items)
-                    extracted_df['رمز المادة'] = extracted_df['رمز المادة'].astype(str).str.strip()
-                    
-                    st.session_state['file_to_invoice'][f.name] = inv_num
-                    
-                    old_items = st.session_state['invoice_raw_data'].get(inv_num, None)
-                    
-                    if old_items is not None:
-                        old_sorted = sorted(old_items, key=lambda x: str(x['رمز المادة']))
-                        new_sorted = sorted(items, key=lambda x: str(x['رمز المادة']))
-                        
-                        is_exact_duplicate = (old_sorted == new_sorted)
-                        
-                        if is_exact_duplicate:
-                            st.error(f"❌ خطأ كبير: هذه الفاتورة ({inv_num}) مطابقة تماماً وتمت معالجتها مسبقاً! تم تجاهل رفعها لتجنب التكرار.")
-                            continue 
-                        else:
-                            st.warning(f"⚠️ تم رصد تعديل على الفاتورة ({inv_num})! يتم عكس محتواها القديم وتحديثها بالبيانات الجديدة.")
-                            for old_row in old_items:
-                                code = old_row['رمز المادة']
-                                qty_to_restore = old_row['الكمية المخصومة']
-                                st.session_state['live_stock'].loc[
-                                    st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
-                                ] += qty_to_restore
+    if not OPENAI_API_KEY:
+        st.error(
+            "قراءة الفاتورة الحقيقية غير مفعلة. أضف مفتاح OpenAI في Secrets؛ "
+            "لن يغيّر التطبيق المخزون اعتماداً على بيانات تجريبية."
+        )
+    if st.button(
+        "🔎 قراءة صور الفواتير",
+        type="primary",
+        use_container_width=True,
+        disabled=not OPENAI_API_KEY,
+    ):
+        for invoice_file in active_invoices_list:
+            image_hash = hashlib.sha256(invoice_file.getvalue()).hexdigest()
+            if image_hash in st.session_state['recognized_invoices']:
+                continue
+            with st.spinner(f"جاري قراءة {invoice_file.name}..."):
+                try:
+                    st.session_state['recognized_invoices'][image_hash] = (
+                        extract_invoice_data(invoice_file)
+                    )
+                except Exception as recognition_error:
+                    st.error(f"{invoice_file.name}: {recognition_error}")
 
-                    live_df = st.session_state['live_stock'].copy()
-                    live_df.rename(columns={'الكمية': 'الكمية قبل الفاتورة'}, inplace=True)
-                    
-                    merged_df = pd.merge(live_df, extracted_df[['رمز المادة', 'الكمية المخصومة']], on='رمز المادة', how='inner')
-                    merged_df['الكمية بعد الفاتورة'] = merged_df['الكمية قبل الفاتورة'] - merged_df['الكمية المخصومة']
-                    
-                    st.session_state['processed_invoices'][inv_num] = merged_df
-                    st.session_state['invoice_raw_data'][inv_num] = items
-                    
-                    for idx, row in extracted_df.iterrows():
-                        code = row['رمز المادة']
-                        qty_deduct = row['الكمية المخصومة']
-                        st.session_state['live_stock'].loc[
-                            st.session_state['live_stock']['رمز المادة'] == code, 'الكمية'
-                        ] -= qty_deduct
-                            
-                st.success("✅ تمت معالجة الفواتير بنجاح وتحديث حالة المخزون!")
+for image_hash, recognized in list(st.session_state['recognized_invoices'].items()):
+    invoice_label = recognized.get("invoice_number") or "فاتورة بلا رقم"
+    with st.expander(f"🧾 مراجعة {invoice_label}", expanded=True):
+        confidence = float(recognized.get("confidence", 0) or 0)
+        if confidence < 0.85:
+            st.warning(
+                f"دقة القراءة المعلنة {confidence:.0%}. راجع كل سطر قبل الاعتماد."
+            )
+        for warning in recognized.get("warnings", []):
+            st.warning(str(warning))
 
-    st.divider()
+        raw_items = pd.DataFrame(recognized.get("items", []))
+        if raw_items.empty:
+            st.error("لم يتم التعرف على أي مادة في هذه الصورة.")
+            continue
+        review_items = raw_items.rename(columns={
+            "item_code": "رمز المادة",
+            "item_name": "اسم المادة",
+            "quantity": "الكمية",
+        })[["رمز المادة", "اسم المادة", "الكمية"]]
 
-    # ==========================================
-    # 2. INVOICE PREVIEWS & BEFORE/AFTER IMPACT
-    # ==========================================
-    if st.session_state['processed_invoices']:
-        st.subheader("مراجعة الفواتير والمواد المعدلة (قبل وبعد)")
-        st.caption("انقر على تبويب رقم الفاتورة أدناه لعرض المواد المؤثرة بدقة.")
-        
-        inv_tabs = list(st.session_state['processed_invoices'].keys())
-        tabs = st.tabs(inv_tabs)
-        
-        for tab, inv_num in zip(tabs, inv_tabs):
-            with tab:
-                impact_df = st.session_state['processed_invoices'][inv_num]
-                
-                col_info, col_table = st.columns([1, 2])
-                with col_info:
-                    st.write(f"رقم الفاتورة: {inv_num}")
-                    st.success("حالة الفاتورة: معالجة ومخصومة من المخزون")
-                
-                with col_table:
-                    st.write("**المواد المؤثرة في هذه الفاتورة (مقارنة قبل وبعد):**")
-                    st.markdown(impact_df[['رمز المادة', 'اسم المادة', 'الكمية قبل الفاتورة', 'الكمية المخصومة', 'الكمية بعد الفاتورة']].to_html(index=False), unsafe_allow_html=True)
+        with st.form(f"invoice_review_{image_hash}"):
+            review_col1, review_col2 = st.columns([1.25, 0.75])
+            with review_col1:
+                invoice_reference = st.text_input(
+                    "رقم الفاتورة",
+                    value=str(recognized.get("invoice_number", "")),
+                    key=f"invoice_number_{image_hash}",
+                )
+            with review_col2:
+                movement_type = st.selectbox(
+                    "تأثير الفاتورة",
+                    options=["OUT", "IN"],
+                    index=0 if recognized.get("movement_type") == "OUT" else 1,
+                    format_func=lambda value: "إخراج / بيع" if value == "OUT" else "إدخال / شراء أو مرتجع",
+                    key=f"invoice_type_{image_hash}",
+                )
+            edited_items = st.data_editor(
+                review_items,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="dynamic",
+                key=f"invoice_items_{image_hash}",
+            )
+            invoice_password = st.text_input(
+                "كلمة مرور المستخدم لاعتماد هذه العملية",
+                type="password",
+                key=f"invoice_password_{image_hash}",
+            )
+            post_invoice = st.form_submit_button(
+                "اعتماد الفاتورة وتحديث المخزون",
+                type="primary",
+                use_container_width=True,
+            )
+
+            if post_invoice:
+                try:
+                    if st.session_state['live_stock'] is None:
+                        raise ValueError("حمّل تقرير المخزون قبل اعتماد الفاتورة.")
+                    if not verify_operation_password(invoice_password):
+                        raise ValueError("كلمة المرور غير صحيحة؛ لم تُنفذ العملية.")
+                    invoice_reference = str(invoice_reference).strip()
+                    if not invoice_reference:
+                        raise ValueError("رقم الفاتورة مطلوب.")
+                    previous_invoice = invoice_already_posted(invoice_reference, image_hash)
+                    if previous_invoice:
+                        raise ValueError(
+                            f"الفاتورة/الصورة منفذة سابقاً تحت المرجع {previous_invoice}."
+                        )
+
+                    stock_df = st.session_state['live_stock']
+                    changes = []
+                    unmatched = []
+                    for _, item in edited_items.iterrows():
+                        code = normalize_item_code(item.get("رمز المادة", ""))
+                        name_key = normalize_item_name(item.get("اسم المادة", ""))
+                        quantity = pd.to_numeric(item.get("الكمية"), errors="coerce")
+                        code_match = stock_df[
+                            stock_df["رمز المادة"].map(normalize_item_code) == code
+                        ] if code else pd.DataFrame()
+                        name_match = stock_df[
+                            stock_df["مفتاح المطابقة"] == name_key
+                        ] if name_key else pd.DataFrame()
+                        match = code_match if not code_match.empty else name_match
+                        if match.empty or len(match) > 1 or pd.isna(quantity):
+                            unmatched.append(f"{code} {item.get('اسم المادة', '')}".strip())
+                            continue
+                        changes.append({
+                            "row_index": int(match.index[0]),
+                            "movement_type": movement_type,
+                            "quantity": float(quantity),
+                        })
+                    if unmatched:
+                        raise ValueError(
+                            "مواد غير مطابقة بشكل آمن: " + "، ".join(unmatched[:8])
+                        )
+                    if not changes:
+                        raise ValueError("لا توجد مواد صالحة للاعتماد.")
+
+                    grouped_changes = {}
+                    for change in changes:
+                        group_key = (change["row_index"], change["movement_type"])
+                        grouped_changes[group_key] = (
+                            grouped_changes.get(group_key, 0) + change["quantity"]
+                        )
+                    changes = [
+                        {
+                            "row_index": row_index,
+                            "movement_type": line_type,
+                            "quantity": quantity,
+                        }
+                        for (row_index, line_type), quantity in grouped_changes.items()
+                    ]
+
+                    normalized_lines = sorted(
+                        (change["row_index"], change["movement_type"], change["quantity"])
+                        for change in changes
+                    )
+                    fingerprint = hashlib.sha256(
+                        json.dumps(
+                            [image_hash, invoice_reference, normalized_lines],
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    approved_payload = dict(recognized)
+                    approved_payload["reviewed_items"] = edited_items.to_dict("records")
+                    updated_stock, _ = post_stock_operation(
+                        stock_df,
+                        changes,
+                        {
+                            "fingerprint": fingerprint,
+                            "username": current_user,
+                            "source": "INVOICE",
+                            "invoice_reference": invoice_reference,
+                            "without_invoice": False,
+                            "delivery_note": True,
+                            "reason": "فاتورة معترف عليها من الصورة ومراجعة من المستخدم",
+                        },
+                        invoice_payload=approved_payload,
+                    )
+                    st.session_state['live_stock'] = updated_stock
+                    del st.session_state['recognized_invoices'][image_hash]
+                    st.session_state["invoice_flash"] = (
+                        f"تم حفظ الفاتورة {invoice_reference} وتحديث {len(changes)} مادة."
+                    )
+                    st.rerun()
+                except Exception as posting_error:
+                    st.error(str(posting_error))
 
 # ==========================================
 # 3. MOVEMENT ANALYSIS, REORDER & CLEARANCE
 # ==========================================
 inventory_analysis = pd.DataFrame()
 analysis_movement_df = st.session_state['movement_history']
-
-if analysis_movement_df is not None and st.session_state['manual_movements']:
-    manual_for_analysis = pd.DataFrame(st.session_state['manual_movements'])
-    manual_rows = pd.DataFrame({
-        "رمز المادة": manual_for_analysis["رمز المادة"],
-        "اسم المادة": manual_for_analysis["اسم المادة"],
-        "التاريخ": pd.to_datetime(manual_for_analysis["التاريخ"], errors="coerce"),
-        "المرجع": manual_for_analysis["رقم الفاتورة / المرجع"],
-        "الزبون": "",
-        "إدخال": manual_for_analysis.apply(
-            lambda row: row["الكمية"] if row["نوع الحركة"] == "IN" else 0,
-            axis=1,
-        ),
-        "إخراج": manual_for_analysis.apply(
-            lambda row: row["الكمية"] if row["نوع الحركة"] == "OUT" else 0,
-            axis=1,
-        ),
-        "الرصيد": manual_for_analysis["الكمية بعد الحركة"],
-        "المستخدم": manual_for_analysis["المستخدم"],
-        "بيان": manual_for_analysis["السبب"],
-        "مفتاح المطابقة": manual_for_analysis["اسم المادة"].map(normalize_item_name),
-    })
-    analysis_movement_df = pd.concat(
-        [analysis_movement_df, manual_rows], ignore_index=True
+ledger_history = ledger_as_movement_history()
+if not ledger_history.empty:
+    analysis_movement_df = (
+        pd.concat([analysis_movement_df, ledger_history], ignore_index=True)
+        if analysis_movement_df is not None
+        else ledger_history
     )
 
 if st.session_state['live_stock'] is not None and analysis_movement_df is not None:
@@ -719,6 +1529,12 @@ else:
         with reason_col:
             m_note = st.text_input("ملاحظات / سبب الحركة")
 
+        operation_password = st.text_input(
+            "كلمة مرور المستخدم لتنفيذ هذه الحركة",
+            type="password",
+            help="تُطلب كلمة المرور في كل عملية إدخال أو إخراج ولا يتم حفظها في السجل.",
+        )
+
         delivery_note_received = True
         if "إخراج" in m_type:
             st.warning(
@@ -740,6 +1556,8 @@ else:
 
             if m_qty <= 0:
                 st.warning("⚠️ يرجى إدخال كمية صحيحة أكبر من صفر.")
+            elif not verify_operation_password(operation_password):
+                st.error("❌ كلمة المرور غير صحيحة؛ لم تُنفذ العملية.")
             elif not str(m_note).strip():
                 st.warning("⚠️ يرجى كتابة سبب الحركة اليدوية.")
             elif movement_kind == "OUT" and not delivery_note_received:
@@ -749,34 +1567,43 @@ else:
                     f"❌ الكمية المطلوبة ({m_qty:g}) أكبر من الرصيد الحالي ({before_qty:g})."
                 )
             else:
-                delta = float(m_qty) if movement_kind == "IN" else -float(m_qty)
-                after_qty = before_qty + delta
-                st.session_state['live_stock'].at[m_row_index, 'الكمية'] = after_qty
-                movement_record = {
-                    "التاريخ": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "المستخدم": current_user,
-                    "نوع الحركة": movement_kind,
-                    "رمز المادة": str(selected_row.get('رمز المادة', '') or ''),
-                    "اسم المادة": str(selected_row.get('اسم المادة', '') or ''),
-                    "الكمية": float(m_qty),
-                    "الكمية قبل الحركة": before_qty,
-                    "الكمية بعد الحركة": after_qty,
-                    "رقم الفاتورة / المرجع": str(m_reference).strip(),
-                    "بدون فاتورة": "نعم" if without_invoice else "لا",
-                    "وصل تسليم": "نعم" if delivery_note_received else "لا",
-                    "السبب": str(m_note).strip(),
-                }
-                st.session_state['manual_movements'].append(movement_record)
-                message = (
-                    f"🚨 تم تحديث المخزون، لكن الحركة {movement_kind} سُجلت بدون فاتورة / مرجع."
-                    if without_invoice
-                    else f"✅ تم تنفيذ حركة {movement_kind} وتحديث الرصيد إلى {after_qty:g}."
-                )
-                st.session_state['manual_movement_flash'] = {
-                    "message": message,
-                    "without_invoice": without_invoice,
-                }
-                st.rerun()
+                try:
+                    fingerprint = hashlib.sha256(
+                        st.session_state['manual_operation_nonce'].encode("utf-8")
+                    ).hexdigest()
+                    updated_stock, ledger_rows = post_stock_operation(
+                        st.session_state['live_stock'],
+                        [{
+                            "row_index": int(m_row_index),
+                            "movement_type": movement_kind,
+                            "quantity": float(m_qty),
+                        }],
+                        {
+                            "fingerprint": fingerprint,
+                            "username": current_user,
+                            "source": "MANUAL",
+                            "invoice_reference": str(m_reference).strip(),
+                            "without_invoice": without_invoice,
+                            "delivery_note": delivery_note_received,
+                            "reason": str(m_note).strip(),
+                        },
+                    )
+                    st.session_state['live_stock'] = updated_stock
+                    st.session_state['manual_movements'] = load_manual_movements()
+                    after_qty = float(ledger_rows[0][13])
+                    message = (
+                        f"🚨 تم الحفظ تلقائياً، لكن الحركة {movement_kind} بلا فاتورة / مرجع."
+                        if without_invoice
+                        else f"✅ تم حفظ حركة {movement_kind} تلقائياً. الرصيد الجديد {after_qty:g}."
+                    )
+                    st.session_state['manual_movement_flash'] = {
+                        "message": message,
+                        "without_invoice": without_invoice,
+                    }
+                    st.session_state['manual_operation_nonce'] = str(uuid.uuid4())
+                    st.rerun()
+                except Exception as movement_error:
+                    st.error(str(movement_error))
 
     if st.session_state['manual_movements']:
         with st.expander(
@@ -798,6 +1625,84 @@ else:
 # ==========================================
 if st.session_state['live_stock'] is not None:
     st.divider()
+    st.subheader("🌙 تقرير وإقفال نهاية اليوم")
+    report_date_col, report_status_col = st.columns([0.45, 1.55])
+    with report_date_col:
+        end_of_day_date = st.date_input(
+            "تاريخ التقرير", value=datetime.now().date(), key="end_of_day_date"
+        )
+    closure = daily_closure_for_date(end_of_day_date)
+    with report_status_col:
+        if closure:
+            st.success(
+                f"اليوم مقفل بواسطة {closure['username']} بتاريخ {closure['closed_at']}"
+            )
+        else:
+            st.info("التقرير مباشر. الإقفال يثبت ملخص اليوم في سجل التدقيق.")
+
+    report_stock = load_daily_stock_snapshot(end_of_day_date)
+    if report_stock is None:
+        report_stock = st.session_state['live_stock']
+    end_report_bytes, end_ledger, affected_items = build_end_of_day_report(
+        end_of_day_date,
+        report_stock,
+        inventory_analysis,
+    )
+    day_in = float(
+        end_ledger.loc[end_ledger["movement_type"] == "IN", "quantity"].sum()
+    ) if not end_ledger.empty else 0
+    day_out = float(
+        end_ledger.loc[end_ledger["movement_type"] == "OUT", "quantity"].sum()
+    ) if not end_ledger.empty else 0
+    day_alerts = int(end_ledger["without_invoice"].sum()) if not end_ledger.empty else 0
+    eod1, eod2, eod3, eod4 = st.columns(4)
+    eod1.metric("حركات اليوم", len(end_ledger))
+    eod2.metric("إجمالي الإدخال", f"{day_in:g}")
+    eod3.metric("إجمالي الإخراج", f"{day_out:g}")
+    eod4.metric("بدون فاتورة", day_alerts)
+
+    if not end_ledger.empty:
+        with st.expander("عرض حركات اليوم والمواد المتأثرة", expanded=False):
+            st.dataframe(end_ledger, use_container_width=True, hide_index=True)
+            if not affected_items.empty:
+                st.dataframe(
+                    affected_items.drop(columns=["item_key"], errors="ignore"),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    eod_download_col, eod_close_col = st.columns(2)
+    with eod_download_col:
+        st.download_button(
+            "📥 تنزيل تقرير نهاية اليوم الكامل",
+            data=end_report_bytes,
+            file_name=f"GoldenPalace_EndOfDay_{end_of_day_date:%Y-%m-%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with eod_close_col:
+        with st.form("close_business_day_form"):
+            close_password = st.text_input(
+                "كلمة المرور لإقفال اليوم", type="password"
+            )
+            close_clicked = st.form_submit_button(
+                "🔒 إقفال وتثبيت ملخص اليوم",
+                use_container_width=True,
+                disabled=closure is not None,
+            )
+            if close_clicked:
+                if not verify_operation_password(close_password):
+                    st.error("كلمة المرور غير صحيحة؛ لم يتم إقفال اليوم.")
+                else:
+                    close_business_day(
+                        end_of_day_date,
+                        current_user,
+                        st.session_state['live_stock'],
+                    )
+                    st.success("تم إقفال اليوم وتثبيت ملخصه في سجل التدقيق.")
+                    st.rerun()
+
+    st.divider()
     st.subheader("حالة المخزون المباشر الحالية")
     display_searchable_table(st.session_state['live_stock'], "live_stock")
     
@@ -806,7 +1711,7 @@ if st.session_state['live_stock'] is not None:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             export_stock = st.session_state['live_stock'].drop(
-                columns=['مفتاح المطابقة'], errors='ignore'
+                columns=['مفتاح المطابقة', 'مفتاح المخزون'], errors='ignore'
             )
             export_stock.to_excel(writer, index=False, sheet_name='Final_Stock')
             if not inventory_analysis.empty:
