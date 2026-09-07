@@ -509,13 +509,37 @@ def enrich_stock_codes(stock_df, movement_df):
     return stock
 
 
-def build_inventory_analysis(stock_df, movement_df, lead_days, safety_days, slow_days):
-    """Calculate demand velocity, ABC movement class, reorder and clearance flags."""
+def build_inventory_analysis(
+    stock_df,
+    movement_df,
+    lead_days,
+    safety_days,
+    slow_days,
+    demand_window_days=90,
+    review_days=30,
+    purchase_prefixes=None,
+):
+    """Build a purchase-aware reorder plan from demand, stock and supply history."""
     if movement_df is None or movement_df.empty:
         return pd.DataFrame()
-    start_date = movement_df["التاريخ"].min()
-    end_date = movement_df["التاريخ"].max()
-    period_days = max(1, (end_date.date() - start_date.date()).days + 1)
+
+    movement_df = movement_df.copy()
+    movement_df["التاريخ"] = pd.to_datetime(
+        movement_df["التاريخ"], errors="coerce"
+    )
+    movement_df = movement_df[movement_df["التاريخ"].notna()].copy()
+    end_date = movement_df["التاريخ"].max().normalize()
+    demand_window_days = max(7, int(demand_window_days))
+    review_days = max(1, int(review_days))
+    recent_start = end_date - pd.Timedelta(days=demand_window_days - 1)
+    prior_end = recent_start - pd.Timedelta(days=1)
+    prior_start = prior_end - pd.Timedelta(days=demand_window_days - 1)
+
+    purchase_prefixes = tuple(
+        prefix.strip()
+        for prefix in (purchase_prefixes or ("إد.م. م. م.",))
+        if str(prefix).strip()
+    )
 
     grouped = movement_df.groupby("مفتاح المطابقة", as_index=False).agg(
         **{
@@ -534,16 +558,96 @@ def build_inventory_analysis(stock_df, movement_df, lead_days, safety_days, slow
     )
     grouped["آخر إخراج"] = grouped["مفتاح المطابقة"].map(last_out)
 
+    recent_out = (
+        movement_df[
+            (movement_df["إخراج"] > 0)
+            & (movement_df["التاريخ"] >= recent_start)
+            & (movement_df["التاريخ"] < end_date + pd.Timedelta(days=1))
+        ]
+        .groupby("مفتاح المطابقة")["إخراج"]
+        .sum()
+    )
+    prior_out = (
+        movement_df[
+            (movement_df["إخراج"] > 0)
+            & (movement_df["التاريخ"] >= prior_start)
+            & (movement_df["التاريخ"] < recent_start)
+        ]
+        .groupby("مفتاح المطابقة")["إخراج"]
+        .sum()
+    )
+    grouped[f"خروج آخر {demand_window_days} يوم"] = (
+        grouped["مفتاح المطابقة"].map(recent_out).fillna(0)
+    )
+    grouped["خروج الفترة السابقة"] = (
+        grouped["مفتاح المطابقة"].map(prior_out).fillna(0)
+    )
+
+    reference = movement_df["المرجع"].fillna("").astype(str).str.strip()
+    if purchase_prefixes:
+        purchase_mask = (
+            (movement_df["إدخال"] > 0)
+            & reference.str.startswith(purchase_prefixes)
+        )
+    else:
+        purchase_mask = pd.Series(False, index=movement_df.index)
+    purchases = movement_df[purchase_mask].copy()
+    if not purchases.empty:
+        purchases["يوم الشراء"] = purchases["التاريخ"].dt.normalize()
+        purchase_daily = (
+            purchases.groupby(["مفتاح المطابقة", "يوم الشراء"], as_index=False)["إدخال"]
+            .sum()
+            .sort_values(["مفتاح المطابقة", "يوم الشراء"])
+        )
+        purchase_summary_rows = []
+        for item_key, item_purchases in purchase_daily.groupby("مفتاح المطابقة"):
+            unique_dates = item_purchases["يوم الشراء"].sort_values()
+            gaps = unique_dates.diff().dt.days.dropna()
+            last_row = item_purchases.iloc[-1]
+            purchase_summary_rows.append({
+                "مفتاح المطابقة": item_key,
+                "آخر شراء/توريد": last_row["يوم الشراء"],
+                "كمية آخر شراء/توريد": float(last_row["إدخال"]),
+                "عدد مرات الشراء/التوريد": int(len(item_purchases)),
+                "متوسط فترة التوريد": (
+                    float(gaps.mean()) if not gaps.empty else float("nan")
+                ),
+            })
+        purchase_summary = pd.DataFrame(purchase_summary_rows)
+        grouped = grouped.merge(
+            purchase_summary, on="مفتاح المطابقة", how="left"
+        )
+    else:
+        grouped["آخر شراء/توريد"] = pd.NaT
+        grouped["كمية آخر شراء/توريد"] = 0.0
+        grouped["عدد مرات الشراء/التوريد"] = 0
+        grouped["متوسط فترة التوريد"] = float("nan")
+
     stock_view = stock_df[["مفتاح المطابقة", "رمز المادة", "اسم المادة", "الكمية"]].copy()
     analysis = stock_view.merge(grouped, on="مفتاح المطابقة", how="left")
     analysis["رمز المادة"] = analysis["رمز المادة"].where(
         analysis["رمز المادة"].astype(str).str.strip().ne(""),
         analysis["رمز الحركة"],
     ).fillna("")
-    for column in ("إجمالي الإدخال", "إجمالي الإخراج", "عدد الحركات"):
+    numeric_columns = (
+        "إجمالي الإدخال", "إجمالي الإخراج", "عدد الحركات",
+        f"خروج آخر {demand_window_days} يوم", "خروج الفترة السابقة",
+        "كمية آخر شراء/توريد", "عدد مرات الشراء/التوريد",
+    )
+    for column in numeric_columns:
         analysis[column] = pd.to_numeric(analysis[column], errors="coerce").fillna(0)
 
-    analysis["متوسط الخروج اليومي"] = analysis["إجمالي الإخراج"] / period_days
+    recent_column = f"خروج آخر {demand_window_days} يوم"
+    analysis["الخروج اليومي الحديث"] = analysis[recent_column] / demand_window_days
+    analysis["متوسط الخروج اليومي"] = analysis["الخروج اليومي الحديث"]
+    recent_rate = analysis[recent_column] / demand_window_days
+    prior_rate = analysis["خروج الفترة السابقة"] / demand_window_days
+    trend_ratio = recent_rate / prior_rate.replace(0, pd.NA)
+    analysis["اتجاه الطلب"] = "مستقر"
+    analysis.loc[(prior_rate <= 0) & (recent_rate > 0), "اتجاه الطلب"] = "صاعد"
+    analysis.loc[trend_ratio >= 1.25, "اتجاه الطلب"] = "صاعد"
+    analysis.loc[(trend_ratio <= 0.75) & (recent_rate > 0), "اتجاه الطلب"] = "هابط"
+    analysis.loc[recent_rate <= 0, "اتجاه الطلب"] = "بدون طلب حديث"
     demand = analysis["إجمالي الإخراج"].sort_values(ascending=False)
     total_demand = demand.sum()
     if total_demand > 0:
@@ -559,19 +663,60 @@ def build_inventory_analysis(stock_df, movement_df, lead_days, safety_days, slow
     analysis["أيام منذ آخر خروج"] = (
         end_date.normalize() - pd.to_datetime(analysis["آخر إخراج"])
     ).dt.days
+    analysis["أيام منذ آخر شراء/توريد"] = (
+        end_date - pd.to_datetime(analysis["آخر شراء/توريد"])
+    ).dt.days
+    analysis["تغطية المخزون بالأيام"] = (
+        analysis["الكمية"] / recent_rate.replace(0, float("nan"))
+    ).clip(lower=0).astype(float).round(1)
+    analysis["مخزون الأمان"] = (recent_rate * safety_days).round().astype(int)
     analysis["حد إعادة الطلب"] = (
-        analysis["متوسط الخروج اليومي"] * (lead_days + safety_days)
+        recent_rate * lead_days + analysis["مخزون الأمان"]
     ).round().astype(int)
-    target_days = lead_days + safety_days + 30
+    target_days = lead_days + safety_days + review_days
     analysis["كمية الطلب المقترحة"] = (
-        analysis["متوسط الخروج اليومي"] * target_days - analysis["الكمية"]
+        recent_rate * target_days - analysis["الكمية"]
     ).clip(lower=0).round().astype(int)
-    analysis["حالة الطلب"] = "لا يحتاج"
-    reorder_mask = (
-        (analysis["متوسط الخروج اليومي"] > 0)
-        & (analysis["الكمية"] <= analysis["حد إعادة الطلب"])
+
+    cover = analysis["تغطية المخزون بالأيام"]
+    has_recent_demand = analysis[recent_column] > 0
+    critical = has_recent_demand & (
+        (analysis["الكمية"] <= 0) | (cover <= lead_days)
     )
+    high = has_recent_demand & ~critical & (
+        (analysis["الكمية"] <= analysis["حد إعادة الطلب"])
+        | (cover <= lead_days + safety_days)
+    )
+    watch = has_recent_demand & ~critical & ~high & (
+        (analysis["اتجاه الطلب"] == "صاعد")
+        & (cover <= target_days)
+    )
+    analysis["أولوية الطلب"] = "لا يحتاج"
+    analysis.loc[watch, "أولوية الطلب"] = "مراقبة"
+    analysis.loc[high, "أولوية الطلب"] = "عالية"
+    analysis.loc[critical, "أولوية الطلب"] = "حرجة"
+    analysis["حالة الطلب"] = "لا يحتاج"
+    reorder_mask = critical | high | watch
     analysis.loc[reorder_mask, "حالة الطلب"] = "إعادة طلب"
+
+    def decision_reason(row):
+        if row["أولوية الطلب"] == "لا يحتاج":
+            if row[recent_column] <= 0:
+                return "لا يوجد طلب حديث؛ راجع التصريف بدلاً من الشراء"
+            return "الرصيد يغطي مدة التوريد والأمان والمراجعة"
+        cover_text = (
+            f"تغطية {row['تغطية المخزون بالأيام']:.0f} يوم"
+            if pd.notna(row["تغطية المخزون بالأيام"])
+            else "لا توجد تغطية"
+        )
+        purchase_text = (
+            f"آخر توريد منذ {int(row['أيام منذ آخر شراء/توريد'])} يوم"
+            if pd.notna(row["أيام منذ آخر شراء/توريد"])
+            else "لا يوجد شراء/توريد مطابق للمرجع المحدد"
+        )
+        return f"{cover_text}؛ الطلب {row['اتجاه الطلب']}؛ {purchase_text}"
+
+    analysis["سبب القرار"] = analysis.apply(decision_reason, axis=1)
 
     clearance_mask = (
         (analysis["الكمية"] > 0)
@@ -583,10 +728,12 @@ def build_inventory_analysis(stock_df, movement_df, lead_days, safety_days, slow
     )
     analysis["اقتراح التصريف"] = ""
     analysis.loc[clearance_mask, "اقتراح التصريف"] = "مرشح للتصريف"
-    analysis["فترة التحليل"] = f"{period_days} يوم"
+    analysis["فترة التحليل"] = f"آخر {demand_window_days} يوم"
+    priority_order = {"حرجة": 0, "عالية": 1, "مراقبة": 2, "لا يحتاج": 3}
+    analysis["ترتيب الأولوية"] = analysis["أولوية الطلب"].map(priority_order)
     return analysis.sort_values(
-        ["حالة الطلب", "إجمالي الإخراج"], ascending=[True, False]
-    ).reset_index(drop=True)
+        ["ترتيب الأولوية", "كمية الطلب المقترحة"], ascending=[True, False]
+    ).drop(columns=["ترتيب الأولوية"]).reset_index(drop=True)
 
 
 def stock_item_key(row):
@@ -1034,6 +1181,15 @@ if st.session_state['live_stock'] is not None:
     dash3.metric("حركات اليوم", f"{today_operations:,}")
     dash4.metric("تنبيهات بلا فاتورة", f"{today_no_invoice:,}")
 
+setup_tab, invoice_tab, manual_tab, analysis_tab, reports_tab = st.tabs([
+    "⚙️ الإعداد والبيانات",
+    "🧾 قراءة الفواتير",
+    "↔️ حركة يدوية",
+    "📊 التحليل والطلب",
+    "🌙 تقارير نهاية اليوم",
+])
+setup_tab.__enter__()
+
 # ==========================================
 # HELPER: SEARCHABLE TABLE
 # ==========================================
@@ -1112,7 +1268,7 @@ with st.expander("💾 حفظ أو استعادة حالة العمل (لتجن�
             except Exception as e:
                 st.error("ملف التخزين غير صالح.")
 
-col1, col2, col3 = st.columns(3)
+col1, col3 = st.columns(2)
 
 with col1:
     if is_admin:
@@ -1153,12 +1309,9 @@ with col1:
     else:
         st.info("🔒 📊 رفع تقرير المخزون الأساسي مقتصر على مدير النظام (Admin).")
 
-with col2:
-    uploaded_invoices = st.file_uploader("🖼️ 2. رفع صور الفواتير (من الألبوم)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-
 with col3:
     uploaded_movement_report = st.file_uploader(
-        "📈 3. رفع تقرير حركة المادة للتحليل",
+        "📈 2. رفع تقرير حركة المادة للتحليل",
         type=["xlsx", "xls"],
         help="يستخدم للتحليل والتصنيف فقط؛ لا تُخصم حركاته القديمة من رصيد الجرد الحالي.",
     )
@@ -1183,6 +1336,16 @@ with col3:
                 st.caption("تقرير الحركة محفوظ ومحدّث.")
         except Exception as movement_error:
             st.error(f"تعذر قراءة تقرير الحركة: {movement_error}")
+
+setup_tab.__exit__(None, None, None)
+invoice_tab.__enter__()
+st.subheader("🧾 قراءة الفاتورة ومراجعتها")
+st.caption("ارفع الصورة، راجع النتيجة، ثم أدخل كلمة المرور لاعتماد الحركة.")
+uploaded_invoices = st.file_uploader(
+    "رفع صور الفواتير",
+    type=["png", "jpg", "jpeg"],
+    accept_multiple_files=True,
+)
 
 # STRICT OPTIONAL CAMERA: Fully off until checked
 camera_image = None
@@ -1380,6 +1543,8 @@ for image_hash, recognized in list(st.session_state['recognized_invoices'].items
 # ==========================================
 # 3. MOVEMENT ANALYSIS, REORDER & CLEARANCE
 # ==========================================
+invoice_tab.__exit__(None, None, None)
+analysis_tab.__enter__()
 inventory_analysis = pd.DataFrame()
 analysis_movement_df = st.session_state['movement_history']
 ledger_history = ledger_as_movement_history()
@@ -1407,8 +1572,37 @@ if st.session_state['live_stock'] is not None and analysis_movement_df is not No
             slow_days = st.number_input(
                 "يُعد بطيئاً بعد عدم خروج لمدة", min_value=30, value=90, step=15
             )
+        setting_col4, setting_col5 = st.columns(2)
+        with setting_col4:
+            demand_window_days = st.number_input(
+                "فترة قياس الطلب الحديث (يوم)",
+                min_value=30,
+                value=90,
+                step=30,
+            )
+        with setting_col5:
+            review_days = st.number_input(
+                "الفترة حتى مراجعة الطلب القادمة (يوم)",
+                min_value=7,
+                value=30,
+                step=7,
+            )
+        purchase_prefix_text = st.text_input(
+            "مراجع حركات الشراء/التوريد",
+            value="إد.م. م. م.",
+            help=(
+                "افصل أكثر من بداية مرجع بفاصلة. لا تُحسب أرصدة البداية أو "
+                "تسويات الجرد أو المرتجعات كشراء إلا إذا أضفت مرجعها هنا."
+            ),
+        )
+        purchase_prefixes = [
+            part.strip()
+            for part in purchase_prefix_text.replace("،", ",").split(",")
+            if part.strip()
+        ]
         st.caption(
-            "كمية الطلب المقترحة تغطي مدة التوريد + الأمان + 30 يوماً للمراجعة القادمة."
+            "القرار يجمع الرصيد الحالي، الطلب الحديث، تغطية المخزون، اتجاه الطلب، "
+            "وموعد آخر شراء/توريد مطابق للمراجع أعلاه."
         )
 
     inventory_analysis = build_inventory_analysis(
@@ -1417,6 +1611,9 @@ if st.session_state['live_stock'] is not None and analysis_movement_df is not No
         int(lead_days),
         int(safety_days),
         int(slow_days),
+        int(demand_window_days),
+        int(review_days),
+        purchase_prefixes,
     )
     reorder_df = inventory_analysis[
         inventory_analysis["حالة الطلب"] == "إعادة طلب"
@@ -1447,8 +1644,12 @@ if st.session_state['live_stock'] is not None and analysis_movement_df is not No
     with reorder_tab:
         st.dataframe(
             reorder_df[[
-                "رمز المادة", "اسم المادة", "الكمية", "إجمالي الإخراج",
-                "متوسط الخروج اليومي", "حد إعادة الطلب", "كمية الطلب المقترحة",
+                "أولوية الطلب", "رمز المادة", "اسم المادة", "الكمية",
+                f"خروج آخر {int(demand_window_days)} يوم",
+                "الخروج اليومي الحديث", "تغطية المخزون بالأيام", "اتجاه الطلب",
+                "آخر شراء/توريد", "كمية آخر شراء/توريد",
+                "أيام منذ آخر شراء/توريد", "متوسط فترة التوريد",
+                "حد إعادة الطلب", "كمية الطلب المقترحة", "سبب القرار",
             ]],
             use_container_width=True,
             hide_index=True,
@@ -1484,6 +1685,8 @@ if st.session_state['live_stock'] is not None and analysis_movement_df is not No
 # ==========================================
 # 4. MANUAL IN / OUT STOCK MOVEMENTS
 # ==========================================
+analysis_tab.__exit__(None, None, None)
+manual_tab.__enter__()
 st.divider()
 st.subheader("📝 حركة المخزون اليدوية (إدخال / إخراج)")
 flash = st.session_state.pop('manual_movement_flash', None)
@@ -1623,6 +1826,8 @@ else:
 # ==========================================
 # 5. LIVE STOCK & END OF DAY EXPORT
 # ==========================================
+manual_tab.__exit__(None, None, None)
+reports_tab.__enter__()
 if st.session_state['live_stock'] is not None:
     st.divider()
     st.subheader("🌙 تقرير وإقفال نهاية اليوم")
@@ -1750,3 +1955,5 @@ if st.session_state['live_stock'] is not None:
             type="primary",
             use_container_width=True
         )
+
+reports_tab.__exit__(None, None, None)
