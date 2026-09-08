@@ -1,7 +1,7 @@
 name: Staging validation
 on:
   push:
-    branches: [cloud-v5-staging, fix-libgl-runtime]
+    branches: [cloud-v5-staging, fix-libgl-runtime, fix-ocr-no-apt-test]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -13,7 +13,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,10 +21,6 @@ jobs:
           python-version: '3.11'
       - name: Verify and assemble logo
         run: python scripts/assemble_assets.py
-      - name: Install Streamlit system packages
-        run: |
-          sudo apt-get update
-          xargs -r sudo apt-get install -y < packages.txt
       - name: Install full app requirements
         run: python -m pip install -r requirements.txt
       - name: Compile application modules
@@ -47,8 +43,25 @@ jobs:
           draw.text((30, 60), '010716   3.00   8042', fill='black')
           engine = RapidOCR()
           result = engine(np.asarray(image))
+          assert result is not None
           print('RapidOCR smoke OK', type(result).__name__)
           PY
+      - name: Reproduce on clean Python 3.11 slim with no apt packages
+        run: |
+          docker run --rm -v "$PWD:/app" -w /app python:3.11-slim bash -lc '
+            python -m pip install --upgrade pip >/dev/null &&
+            python -m pip install -r requirements.txt >/dev/null &&
+            python - <<"PY"
+          import cv2, onnxruntime
+          from rapidocr import RapidOCR
+          import numpy as np
+          print("slim cv2", cv2.__version__)
+          print("slim onnxruntime", onnxruntime.__version__)
+          result = RapidOCR()(np.full((180, 600, 3), 255, dtype=np.uint8))
+          assert result is not None
+          print("Clean slim OCR runtime passed")
+          PY
+          '
   publish-logo:
     needs: validate
     if: github.event_name == 'push' && github.ref == 'refs/heads/cloud-v5-staging'
