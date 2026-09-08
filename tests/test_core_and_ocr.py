@@ -27,10 +27,9 @@ def test_analysis_and_zero_previous_rate():
     assert len(output)==1
 
 
-def test_ambiguous_enrichment_does_not_guess():
-    stock=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"",COL_NAME:"Camera",COL_QTY:1}]))
-    history=pd.DataFrame([{COL_CODE:"A",COL_MATCH:"camera"},{COL_CODE:"B",COL_MATCH:"camera"}])
-    assert enrich_stock_codes(stock,history).iloc[0][COL_CODE]==""
+def test_warehouse_master_rejects_missing_code():
+    with pytest.raises(ValueError,match="رمز"):
+        ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"",COL_NAME:"Camera",COL_QTY:1}]))
 
 
 def test_report_export_blocks_formula_injection():
@@ -43,9 +42,9 @@ def test_report_export_blocks_formula_injection():
 
 def test_history_import_no_stock_deduction():
     s=Store.for_tests();pw="Test-Password-2026";s.initialize(password=pw);t=s.login("admin",pw)
-    stock=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"",COL_NAME:"Camera",COL_QTY:10}]))
+    stock=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"010716",COL_NAME:"Camera",COL_QTY:10}]))
     s.replace_stock(t,pw,stock,"base",s.state(t)["revision"])
-    history=pd.DataFrame([{COL_CODE:"010716",COL_NAME:"Camera",COL_MATCH:"camera",COL_DATE:pd.Timestamp("2026-01-01"),
+    history=pd.DataFrame([{COL_CODE:"010716",COL_NAME:"Camera",COL_MATCH:"CODE:010716",COL_DATE:pd.Timestamp("2026-01-01"),
                           COL_REF:"R1",COL_IN:100,COL_OUT:90,COL_BAL:10}])
     s.import_history(t,pw,history,"a"*64,utcnow(),"history")
     assert s.stock(t).iloc[0][COL_QTY]==10
