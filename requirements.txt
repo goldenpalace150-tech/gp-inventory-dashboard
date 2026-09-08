@@ -1,5 +1,6 @@
 streamlit
-pyarrow<25.0.0
 pandas
+Pillow
 openpyxl
-starlette<0.38.0
+xlrd
+pytesseract
