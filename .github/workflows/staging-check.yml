@@ -6,7 +6,7 @@ on:
     branches: [main]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: gp-staging-${{ github.ref }}
   cancel-in-progress: false
@@ -20,7 +20,12 @@ jobs:
         with:
           python-version: '3.11'
       - name: Apply v9 source update for validation
-        run: python scripts/v9_update.py
+        run: |
+          if grep -q 'GP-CLOUD-v9' gp_ui.py; then
+            echo 'v9 source is already materialized.'
+          else
+            python scripts/v9_update.py
+          fi
       - name: Verify and assemble logo
         run: python scripts/assemble_assets.py
       - name: Install full app requirements
@@ -117,20 +122,32 @@ jobs:
           assert result is not None
           print('Light OCR engine passed',type(result).__name__)
           PY
-      - name: Reproduce OCR runtime on clean Python 3.11 slim with no apt packages
+      - name: Reproduce OCR runtime on clean Python 3.11 slim with no apt packages and 512 MB limit
         run: |
-          docker run --rm -v "$PWD:/app" -w /app python:3.11-slim bash -lc '
+          docker run --rm --memory=512m --memory-swap=512m -v "$PWD:/app" -w /app python:3.11-slim bash -lc '
             python -m pip install --upgrade pip >/dev/null &&
             python -m pip install -r requirements.txt >/dev/null &&
-            python scripts/v9_update.py &&
-            /usr/bin/time -v python - <<"PY"
+            if grep -q "GP-CLOUD-v9" gp_ui.py; then echo v9-ready; else python scripts/v9_update.py; fi &&
+            python - <<"PY"
           import numpy as np
           from invoice_ocr_worker import get_engine
           result=get_engine()(np.full((700,500,3),255,dtype=np.uint8),use_cls=False)
           assert result is not None
-          print("Clean slim lighter OCR passed")
+          print("Clean slim 512MB lighter OCR passed")
           PY
           '
+      - name: Commit validated v9 source to branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/warehouse-code-link-v9'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add inventory_tracker.py gp_core.py gp_store.py gp_invoice.py gp_ocr.py invoice_ocr_worker.py gp_ui.py tests/test_core_and_ocr.py
+          if git diff --cached --quiet; then
+            echo 'Validated v9 source already committed.'
+          else
+            git commit -m 'feat: link warehouse codes and harden invoice OCR'
+            git push origin HEAD:warehouse-code-link-v9
+          fi
   publish-logo:
     needs: validate
     if: github.event_name == 'push' && github.ref == 'refs/heads/cloud-v5-staging'
