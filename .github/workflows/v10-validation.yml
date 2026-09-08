@@ -17,7 +17,12 @@ jobs:
           python-version: '3.11'
       - name: Apply v10 source update
         run: |
-          if grep -q 'GP-CLOUD-v10' gp_ui.py; then echo v10-ready; else python scripts/v10_update.py; fi
+          if grep -q 'GP-CLOUD-v10' gp_ui.py; then
+            echo v10-ready
+          else
+            python scripts/v10_fix.py
+            python scripts/v10_update.py
+          fi
       - name: Install requirements
         run: python -m pip install -r requirements.txt
       - name: Compile
