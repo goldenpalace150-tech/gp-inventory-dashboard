@@ -306,7 +306,12 @@ def get_ocr_reader():
     if easyocr is None:
         raise RuntimeError("EasyOCR غير مثبتة")
     # CPU mode keeps the app free and works on Streamlit Community Cloud.
-    return easyocr.Reader(list(OCR_PREFERRED_LANGUAGES), gpu=False, verbose=False)
+    return easyocr.Reader(
+        list(OCR_PREFERRED_LANGUAGES),
+        gpu=False,
+        verbose=False,
+        quantize=False,
+    )
 
 
 def _ocr_clean_text(value):
