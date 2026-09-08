@@ -150,7 +150,7 @@ def section_html(title,note=""):
     return f'<div class="gp-section" dir="rtl"><h2>{html.escape(t(title))}</h2><p>{html.escape(t(note))}</p></div>'
 
 # ---- v6 bilingual / branded waiting helpers ----
-BUILD = "GP-CLOUD-v9"
+BUILD = "GP-CLOUD-v10"
 LANGUAGE = "ar"
 AR.update({
     "Language": "اللغة", "Arabic": "العربية", "English": "English",
@@ -220,8 +220,8 @@ def section_html(title,note=""):
 
 def loading_html(message="Loading"):
     d = language_dir()
-    return f'''<div class="gp-loading-backdrop"><div class="gp-loading-card" dir="{d}">
-      <img src="data:image/png;base64,{_icon_data()}" alt="Golden Palace">
+    return f'''<div class="gp-loading-backdrop" role="status" aria-live="polite"><div class="gp-loading-card" dir="{d}">
+      <img class="gp-loading-logo" src="data:image/jpeg;base64,{_logo_data()}" alt="Golden Palace">
       <div class="gp-loading-ring"></div><strong>{html.escape(t(message))}</strong>
     </div></div>'''
 
@@ -237,4 +237,30 @@ AR.update({
     "Warehouse code master required": "ارفع تقرير جرد المستودع الذي يحتوي رمز المادة واسم المادة قبل قراءة الفواتير.",
     "Ignored non-item numbers": "تم تجاهل أرقام ليست رموز مواد في المستودع",
     "Importing stock": "جاري اعتماد رصيد المستودع...",
+})
+
+
+# ---- v10 deletion controls / centered loading popup ----
+AR.update({
+    "Delete data": "حذف البيانات",
+    "Delete invoice": "حذف فاتورة",
+    "Delete movement": "حذف حركة",
+    "Delete warehouse report": "حذف تقرير المستودع",
+    "Warehouse reports": "تقارير المستودع",
+    "Warehouse report": "تقرير المستودع",
+    "Confirm delete": "أؤكد الحذف",
+    "Deleted": "تم الحذف",
+    "Delete data warning": "الحذف متاح للمدير فقط ويعكس تأثير العملية على رصيد المستودع مع الاحتفاظ بسجل تدقيق.",
+    "Delete reverses warehouse quantity": "سيتم عكس تأثير هذه العملية على رصيد المستودع وإعادة احتساب الحركات اللاحقة.",
+    "Warehouse report delete hint": "يمكن حذف أحدث تقرير مستودع فقط، بشرط ألا توجد حركات أو إقفالات لاحقة تعتمد عليه.",
+    "Only latest warehouse report can be deleted": "يمكن حذف أحدث تقرير مستودع فقط.",
+    "No deletable invoices": "لا توجد فواتير قابلة للحذف اليوم.",
+    "No deletable movements": "لا توجد حركات قابلة للحذف اليوم.",
+    "No warehouse reports": "لا توجد تقارير مستودع محفوظة.",
+    "Record not found": "السجل غير موجود أو تم حذفه مسبقاً.",
+    "Only today's invoices and movements can be deleted": "يمكن حذف فواتير وحركات اليوم المفتوح فقط.",
+    "Cannot delete because later movements depend on this quantity": "لا يمكن الحذف لأن حركات لاحقة تعتمد على هذه الكمية.",
+    "Only the latest warehouse report can be deleted": "يمكن حذف أحدث تقرير مستودع فقط.",
+    "Delete later movements before deleting this warehouse report": "احذف الحركات اللاحقة أولاً قبل حذف تقرير المستودع.",
+    "A closed day depends on this warehouse report": "لا يمكن حذف التقرير لأن يوماً مقفلاً يعتمد عليه.",
 })

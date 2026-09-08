@@ -416,7 +416,7 @@ class Store:
             rows=c.execute(select(self.tables["stock_state"]).order_by(self.tables["stock_state"].c.item_name)).mappings().all()
             return self.stock_frame(rows)
 
-    def replace_stock(self, token, password, df, request_key, expected_revision):
+    def replace_stock(self, token, password, df, request_key, expected_revision, source_name=""):
         if df is None or df.empty:
             raise AppError("The stock report is empty")
         df=ensure_unique_stock_keys(df.copy())
@@ -442,10 +442,11 @@ class Store:
                 raise AppError("Set a new baseline before the first movement of the day")
             t=self.tables["stock_state"]
             old=c.execute(select(t)).mappings().all()
+            source_name=str(source_name or "")[:240]
             c.execute(insert(self.tables["baseline_snapshots"]).values(operation_id=op,created_at=utcnow(),
-                username=actor["username"],stock={"before":clean_json([dict(r) for r in old]),"after":clean_json(data)}))
+                username=actor["username"],stock={"before":clean_json([dict(r) for r in old]),"after":clean_json(data),"source_name":source_name}))
             c.execute(delete(t)); c.execute(insert(t),rows)
-            self._record_operation(c,actor,op,request_key,"BASELINE",fp,{"row_count":len(rows)})
+            self._record_operation(c,actor,op,request_key,"BASELINE",fp,{"row_count":len(rows),"source_name":source_name})
             return op
 
     def import_history(self, token, password, df, file_hash, as_of, request_key):
@@ -622,6 +623,148 @@ class Store:
             self._actor(c,token); t=self.tables["movement_ledger"]; q=select(t)
             if day:q=q.where(t.c.business_date==day)
             return pd.DataFrame([dict(r) for r in c.execute(q.order_by(t.c.ledger_id)).mappings()])
+
+    def deletion_catalog(self,token):
+        """Admin-only list of current deletable business records and warehouse reports."""
+        with self.engine.connect() as c:
+            actor=self._actor(c,token)
+            if actor["role"]!="admin":raise AppError("Administrator access required")
+            today=self.today(); operations=self.tables["operations"]; ledger=self.tables["movement_ledger"]
+            op_rows=c.execute(select(operations).where(
+                operations.c.business_date==today,
+                operations.c.source.in_(["MANUAL","INVOICE"])
+            ).order_by(operations.c.created_at.desc())).mappings().all()
+            op_ids=[r["operation_id"] for r in op_rows]
+            line_rows=c.execute(select(ledger).where(ledger.c.operation_id.in_(op_ids)).order_by(ledger.c.ledger_id)).mappings().all() if op_ids else []
+            by_op={}
+            for row in line_rows:by_op.setdefault(row["operation_id"],[]).append(dict(row))
+            posted=self.tables["posted_invoices"]
+            invoice_rows=c.execute(select(posted).where(posted.c.operation_id.in_(op_ids))).mappings().all() if op_ids else []
+            invoices_by_op={r["operation_id"]:dict(r) for r in invoice_rows}
+            baselines=self.tables["baseline_snapshots"]
+            baseline_rows=c.execute(select(baselines).order_by(baselines.c.created_at.desc()).limit(30)).mappings().all()
+
+        invoices=[]; movements=[]
+        for op in op_rows:
+            lines=by_op.get(op["operation_id"],[])
+            total=sum((decimal_qty(r["quantity"]) for r in lines),Decimal(0))
+            if op["source"]=="INVOICE":
+                inv=invoices_by_op.get(op["operation_id"],{})
+                invoices.append(dict(operation_id=op["operation_id"],invoice_reference=inv.get("invoice_reference", ""),
+                    created_at=op["created_at"],username=op["username"],line_count=len(lines),quantity=float(total),
+                    items=[dict(item_code=r["item_code"],item_name=r["item_name"],movement_type=r["movement_type"],quantity=float(r["quantity"])) for r in lines]))
+            else:
+                first=lines[0] if lines else {}
+                movements.append(dict(operation_id=op["operation_id"],created_at=op["created_at"],username=op["username"],
+                    item_code=first.get("item_code", ""),item_name=first.get("item_name", ""),movement_type=first.get("movement_type", ""),
+                    quantity=float(total),reference=first.get("invoice_reference", ""),reason=first.get("reason", "")))
+        reports=[]
+        for row in baseline_rows:
+            payload=row["stock"] if isinstance(row["stock"],dict) else {}
+            reports.append(dict(operation_id=row["operation_id"],created_at=row["created_at"],username=row["username"],
+                source_name=str(payload.get("source_name", "") or ""),item_count=len(payload.get("after",[]) or [])))
+        return {"invoices":invoices,"movements":movements,"stock_reports":reports}
+
+    def _delete_posted_operation_tx(self,c,actor,operation_id,expected_source):
+        operations=self.tables["operations"]; ledger=self.tables["movement_ledger"]
+        op=c.execute(select(operations).where(operations.c.operation_id==str(operation_id)).with_for_update()).mappings().first()
+        if not op or op["source"]!=expected_source:raise AppError("Record not found")
+        today=self.today()
+        if op["business_date"]!=today:raise AppError("Only today's invoices and movements can be deleted")
+        self._open_day(c,today)
+        target=c.execute(select(ledger).where(ledger.c.operation_id==op["operation_id"]).order_by(ledger.c.ledger_id).with_for_update()).mappings().all()
+        if not target:raise AppError("Record not found")
+        max_target_id=max(r["ledger_id"] for r in target)
+        deltas={}
+        for row in target:
+            key=row["item_key"]
+            delta=row["quantity"] if row["movement_type"]=="OUT" else -row["quantity"]
+            deltas[key]=deltas.get(key,Decimal(0))+delta
+
+        stock=self.tables["stock_state"]
+        stock_rows=c.execute(select(stock).where(stock.c.item_key.in_(list(deltas))).order_by(stock.c.item_key).with_for_update()).mappings().all()
+        current={r["item_key"]:dict(r) for r in stock_rows}
+        if set(current)!=set(deltas):raise AppError("An item is missing from the current stock")
+        now=utcnow()
+        for key,delta in deltas.items():
+            new_current=decimal_qty(current[key]["quantity"])+delta
+            if new_current<0:raise AppError("Cannot delete because later movements depend on this quantity")
+            subsequent=c.execute(select(ledger).where(
+                ledger.c.item_key==key,ledger.c.ledger_id>max_target_id
+            ).order_by(ledger.c.ledger_id).with_for_update()).mappings().all()
+            for row in subsequent:
+                new_before=decimal_qty(row["quantity_before"])+delta
+                new_after=decimal_qty(row["quantity_after"])+delta
+                if new_before<0 or new_after<0:
+                    raise AppError("Cannot delete because later movements depend on this quantity")
+                c.execute(update(ledger).where(ledger.c.ledger_id==row["ledger_id"]).values(
+                    quantity_before=new_before,quantity_after=new_after))
+            c.execute(update(stock).where(stock.c.item_key==key).values(quantity=new_current,updated_at=now))
+
+        invoice_reference=""; image_hash=None
+        if expected_source=="INVOICE":
+            invoices=self.tables["posted_invoices"]
+            inv=c.execute(select(invoices).where(invoices.c.operation_id==op["operation_id"]).with_for_update()).mappings().first()
+            if inv:
+                invoice_reference=inv["invoice_reference"]; image_hash=inv["image_hash"]
+                c.execute(delete(invoices).where(invoices.c.operation_id==op["operation_id"]))
+                if image_hash:
+                    drafts=self.tables["invoice_drafts"]
+                    c.execute(update(drafts).where(
+                        drafts.c.username==inv["username"],drafts.c.image_hash==image_hash,drafts.c.status=="posted"
+                    ).values(status="pending",updated_at=now,version=drafts.c.version+1))
+
+        c.execute(delete(ledger).where(ledger.c.operation_id==op["operation_id"]))
+        c.execute(delete(operations).where(operations.c.operation_id==op["operation_id"]))
+        action="DELETE_INVOICE" if expected_source=="INVOICE" else "DELETE_MOVEMENT"
+        self._audit(c,actor["username"],action,{"operation_id":op["operation_id"],"invoice_reference":invoice_reference,"line_count":len(target)})
+        self._touch(c)
+        return op["operation_id"]
+
+    def delete_invoice(self,token,password,invoice_reference):
+        with self.engine.begin() as c:
+            self._lock(c); actor=self._actor(c,token,password,admin=True)
+            invoices=self.tables["posted_invoices"]
+            inv=c.execute(select(invoices).where(invoices.c.invoice_reference==str(invoice_reference)).with_for_update()).mappings().first()
+            if not inv:raise AppError("Record not found")
+            return self._delete_posted_operation_tx(c,actor,inv["operation_id"],"INVOICE")
+
+    def delete_movement(self,token,password,operation_id):
+        with self.engine.begin() as c:
+            self._lock(c); actor=self._actor(c,token,password,admin=True)
+            return self._delete_posted_operation_tx(c,actor,operation_id,"MANUAL")
+
+    def delete_stock_report(self,token,password,operation_id):
+        """Undo only the latest baseline when no later movement/closure depends on it."""
+        with self.engine.begin() as c:
+            self._lock(c); actor=self._actor(c,token,password,admin=True)
+            baselines=self.tables["baseline_snapshots"]; operations=self.tables["operations"]
+            latest=c.execute(select(baselines).order_by(baselines.c.created_at.desc()).limit(1).with_for_update()).mappings().first()
+            if not latest or latest["operation_id"]!=str(operation_id):
+                raise AppError("Only the latest warehouse report can be deleted")
+            op=c.execute(select(operations).where(operations.c.operation_id==latest["operation_id"]).with_for_update()).mappings().first()
+            if not op or op["source"]!="BASELINE":raise AppError("Record not found")
+            ledger=self.tables["movement_ledger"]
+            if c.execute(select(ledger.c.ledger_id).where(ledger.c.created_at>latest["created_at"]).limit(1)).first():
+                raise AppError("Delete later movements before deleting this warehouse report")
+            closures=self.tables["daily_closures"]
+            if c.execute(select(closures.c.business_date).where(closures.c.closed_at>=latest["created_at"]).limit(1)).first():
+                raise AppError("A closed day depends on this warehouse report")
+            payload=latest["stock"] if isinstance(latest["stock"],dict) else {}
+            previous=payload.get("before",[]) or []
+            rows=[]; now=utcnow()
+            for row in previous:
+                rows.append(dict(item_key=str(row.get("item_key", "")),item_code=normalize_item_code(row.get("item_code", "")),
+                    item_name=str(row.get("item_name", "")),quantity=decimal_qty(row.get("quantity",0),normalize=True),
+                    match_key=str(row.get("match_key", "")) or item_link_key(row.get("item_code", ""),row.get("item_name", "")),updated_at=now))
+            stock=self.tables["stock_state"]
+            c.execute(delete(stock))
+            if rows:c.execute(insert(stock),rows)
+            c.execute(delete(baselines).where(baselines.c.operation_id==latest["operation_id"]))
+            c.execute(delete(operations).where(operations.c.operation_id==latest["operation_id"]))
+            self._audit(c,actor["username"],"DELETE_STOCK_REPORT",{"operation_id":latest["operation_id"],"restored_items":len(rows),"source_name":payload.get("source_name","")})
+            self._touch(c)
+            return latest["operation_id"]
 
     def closure(self,token,day):
         with self.engine.connect() as c:

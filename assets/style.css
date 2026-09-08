@@ -62,3 +62,20 @@ button:focus-visible, input:focus-visible { outline:3px solid var(--gp-gold); ou
  .st-key-navigation button { padding:.55rem .65rem; font-size:.88rem; }
  .gp-status { gap:9px; font-size:.82rem; }
 }
+
+
+/* v10: centered modal loading state, independent of the widget that started the work. */
+.gp-loading-backdrop {
+ position:fixed; inset:0; z-index:999999; display:flex; align-items:center; justify-content:center;
+ background:rgba(18,38,62,.26); backdrop-filter:blur(2px); -webkit-backdrop-filter:blur(2px);
+}
+.gp-loading-card {
+ width:min(360px,calc(100vw - 42px)); background:#fff; border:1px solid var(--gp-line); border-top:4px solid var(--gp-gold);
+ border-radius:20px; padding:24px 28px 22px; box-shadow:0 24px 70px #0b1a2d40; text-align:center;
+ display:flex; flex-direction:column; align-items:center; gap:14px;
+}
+.gp-loading-logo { display:block; width:min(250px,78%); height:auto; border-radius:10px; }
+.gp-loading-ring { width:32px; height:32px; border:4px solid #dce3eb; border-top-color:var(--gp-navy); border-radius:50%; animation:gp-spin .8s linear infinite; }
+.gp-loading-card strong { color:var(--gp-ink); font-size:1rem; }
+@keyframes gp-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .gp-loading-ring { animation-duration:1.8s; } }
