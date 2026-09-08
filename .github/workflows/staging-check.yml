@@ -1,0 +1,55 @@
+name: Staging validation
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify logo
+        run: python scripts/assemble_assets.py
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+      - name: Compile application
+        run: python -m compileall -q inventory_tracker.py gp_store.py gp_core.py gp_invoice.py gp_ocr.py gp_ui.py gp_reports.py gp_backup.py invoice_ocr_worker.py
+      - name: Regression tests
+        run: |
+          python -m pip install 'pytest>=8,<10'
+          python -m pytest -o addopts='' -q
+      - name: Verify warehouse terminology and loader
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import gp_ui
+          gp_ui.set_language('ar')
+          assert gp_ui.BUILD=='GP-CLOUD-v10'
+          assert gp_ui.t('Inventory')=='إدارة المستودعات'
+          assert gp_ui.t('Stock')=='المستودع'
+          css=Path('assets/style.css').read_text()
+          assert '.gp-loading-backdrop' in css
+          assert 'position:fixed' in css
+          assert 'align-items:center' in css
+          assert 'justify-content:center' in css
+          print('v10 UI validation passed')
+          PY
+      - name: Smoke OCR runtime under 512 MB
+        run: |
+          docker run --rm --memory=512m --memory-swap=512m -v "$PWD:/app" -w /app python:3.11-slim bash -lc '
+            python -m pip install --upgrade pip >/dev/null &&
+            python -m pip install -r requirements.txt >/dev/null &&
+            python - <<"PY"
+          import numpy as np
+          from invoice_ocr_worker import get_engine
+          result=get_engine()(np.full((700,500,3),255,dtype=np.uint8),use_cls=False)
+          assert result is not None
+          print("Clean slim 512MB OCR passed")
+          PY
+          '
