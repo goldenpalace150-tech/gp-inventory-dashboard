@@ -7,7 +7,7 @@ The SQLite path exists ONLY in Store.for_tests(), for offline regression tests.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import base64
 import hashlib
 import hmac
@@ -55,7 +55,8 @@ def aware(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
-def decimal_qty(value, *, positive=False) -> Decimal:
+def decimal_qty(value, *, positive=False, normalize=False) -> Decimal:
+    """Validate quantities; imported reports may normalize harmless float tails."""
     if isinstance(value, bool) or value is None:
         raise AppError("Invalid quantity")
     try:
@@ -64,7 +65,11 @@ def decimal_qty(value, *, positive=False) -> Decimal:
         raise AppError("Invalid quantity") from None
     if not number.is_finite() or abs(number) > MAX_QTY or (positive and number <= 0):
         raise AppError("Invalid quantity")
-    if number != number.quantize(Decimal("0.0001")):
+    unit = Decimal("0.0001")
+    rounded = number.quantize(unit, rounding=ROUND_HALF_UP)
+    if normalize:
+        number = rounded
+    elif number != rounded:
         raise AppError("Use at most four decimal places")
     return number
 
@@ -420,7 +425,7 @@ class Store:
             name=str(r[COL_NAME]).strip(); key=str(r[COL_KEY]).strip(); code=normalize_item_code(r[COL_CODE])
             if not name or not key or len(code)>160:
                 raise AppError("Invalid stock row")
-            rows.append(dict(item_key=key,item_code=code,item_name=name,quantity=decimal_qty(r[COL_QTY]),
+            rows.append(dict(item_key=key,item_code=code,item_name=name,quantity=decimal_qty(r[COL_QTY],normalize=True),
                 match_key=normalize_item_name(name),updated_at=utcnow()))
         if len({r["item_key"] for r in rows})!=len(rows):
             raise AppError("Duplicate stock keys")
@@ -456,8 +461,8 @@ class Store:
             if dt>as_of:
                 raise AppError("The cutoff is earlier than a movement in the report")
             rows.append(dict(item_code=normalize_item_code(r[COL_CODE]),item_name=str(r[COL_NAME]),movement_date=dt,
-                reference=str(r[COL_REF]),customer=str(r.get(COL_CUSTOMER,"")),qty_in=decimal_qty(r[COL_IN]),
-                qty_out=decimal_qty(r[COL_OUT]),balance=None if pd.isna(r[COL_BAL]) else decimal_qty(r[COL_BAL]),
+                reference=str(r[COL_REF]),customer=str(r.get(COL_CUSTOMER,"")),qty_in=decimal_qty(r[COL_IN],normalize=True),
+                qty_out=decimal_qty(r[COL_OUT],normalize=True),balance=None if pd.isna(r[COL_BAL]) else decimal_qty(r[COL_BAL],normalize=True),
                 username=str(r.get(COL_USER,"")),statement=str(r.get(COL_NOTE,"")),match_key=str(r[COL_MATCH])))
         with self.engine.begin() as c:
             actor,op,again,fp=self._operation(c,token,password,request_key,"HISTORY_IMPORT",

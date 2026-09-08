@@ -148,3 +148,79 @@ def kpis_html(values):
 
 def section_html(title,note=""):
     return f'<div class="gp-section" dir="rtl"><h2>{html.escape(t(title))}</h2><p>{html.escape(t(note))}</p></div>'
+
+# ---- v6 bilingual / branded waiting helpers ----
+BUILD = "GP-CLOUD-v6"
+LANGUAGE = "ar"
+AR.update({
+    "Language": "اللغة", "Arabic": "العربية", "English": "English",
+    "Loading": "جاري التحميل...", "Processing": "جاري التنفيذ...",
+    "Reading report": "جاري قراءة التقرير...", "Saving to cloud": "جاري الحفظ السحابي...",
+    "Loading data": "جاري تحميل البيانات...", "Preparing analysis": "جاري تجهيز التحليل...",
+    "Preparing export": "جاري تجهيز الملف...", "Importing stock": "جاري اعتماد رصيد البداية...",
+    "Importing history": "جاري اعتماد حركة المادة...",
+    "Use at most four decimal places": "الكمية تحتوي منازل عشرية أكثر من المسموح.",
+})
+
+
+def set_language(value):
+    global LANGUAGE
+    LANGUAGE = "en" if str(value).lower().startswith("en") else "ar"
+
+
+def language_dir():
+    return "rtl" if LANGUAGE == "ar" else "ltr"
+
+
+def t(value):
+    value = str(value)
+    return AR.get(value, value) if LANGUAGE == "ar" else value
+
+
+def language_marker():
+    return f'<span class="gp-lang-{LANGUAGE}-marker" hidden></span>'
+
+
+def _logo_data():
+    return base64.b64encode((ROOT/"assets/golden_palace.jpg").read_bytes()).decode()
+
+
+def _icon_data():
+    return base64.b64encode((ROOT/"assets/favicon.png").read_bytes()).decode()
+
+
+def brand_html():
+    data = _logo_data()
+    d = language_dir()
+    return f'''<section class="gp-brand" aria-label="Golden Palace" dir="{d}">
+        <div class="gp-brand-copy"><div class="gp-eyebrow">GOLDEN PALACE / INVENTORY</div>
+        <h1>{html.escape(t("Golden Palace"))}</h1><p>{html.escape(t("Inventory"))}</p></div>
+        <div class="gp-logo"><img src="data:image/jpeg;base64,{data}" alt="Golden Palace"></div>
+        </section>'''
+
+
+def status_html(actor,stamp):
+    d = language_dir()
+    return f'''<div class="gp-status" dir="{d}"><span class="gp-status-pill"><i></i>{html.escape(t("Connected"))}</span>
+    <span><b>{html.escape(actor["display_name"])}</b> / {html.escape(t(actor["role"]))}</span>
+    <span class="gp-muted">{html.escape(t("Last save"))} <bdi>{html.escape(str(stamp))}</bdi></span></div>'''
+
+
+def kpis_html(values):
+    d = language_dir()
+    return '<div class="gp-kpis" dir="'+d+'">'+''.join(
+        f'<article class="gp-kpi"><span>{html.escape(t(label))}</span><strong dir="ltr">{html.escape(str(value))}</strong><small>{html.escape(t(note))}</small></article>'
+        for label,value,note in values)+'</div>'
+
+
+def section_html(title,note=""):
+    d = language_dir()
+    return f'<div class="gp-section" dir="{d}"><h2>{html.escape(t(title))}</h2><p>{html.escape(t(note))}</p></div>'
+
+
+def loading_html(message="Loading"):
+    d = language_dir()
+    return f'''<div class="gp-loading-backdrop"><div class="gp-loading-card" dir="{d}">
+      <img src="data:image/png;base64,{_icon_data()}" alt="Golden Palace">
+      <div class="gp-loading-ring"></div><strong>{html.escape(t(message))}</strong>
+    </div></div>'''

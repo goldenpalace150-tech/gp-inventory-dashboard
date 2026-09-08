@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, time
 from pathlib import Path
+from contextlib import contextmanager
 import gzip
 import hashlib
 import io
@@ -23,15 +24,15 @@ from gp_core import (
     read_stock_report,read_movement_report,enrich_stock_codes,build_inventory_analysis,
 )
 from gp_store import Store, AppError, clean_json, utcnow, aware
-from gp_ui import BUILD, ROOT, t, css, brand_html, status_html, kpis_html, section_html
+from gp_ui import (BUILD, ROOT, t, css, brand_html, status_html, kpis_html, section_html,
+                   set_language, loading_html, language_marker)
 from gp_ocr import free_ocr_status, extract_invoice_data
 from gp_invoice import match_invoice_lines
 from gp_reports import visible_frame, excel_bytes, day_report_sheets
 
-st.set_page_config(page_title=t("Golden Palace")+" | "+t("Stock"),
+st.set_page_config(page_title="Golden Palace | Inventory",
                    page_icon=Image.open(ROOT/"assets/favicon.png"),layout="wide",initial_sidebar_state="collapsed")
 st.markdown("<style>"+css()+"</style>",unsafe_allow_html=True)
-st.markdown(brand_html(),unsafe_allow_html=True)
 LOG=logging.getLogger("golden_palace")
 
 
@@ -50,6 +51,35 @@ def show_error(error):
 @st.cache_resource(show_spinner=False)
 def get_store(settings_json):
     return Store.from_settings(json.loads(settings_json))
+
+
+@st.cache_data(show_spinner=False,ttl=15,max_entries=24)
+def get_shell(database_id,token_hash,_store,_token):
+    actor=_store.actor(_token)
+    state=_store.state(_token)
+    stock=_store.stock(_token)
+    daily=_store.ledger(_token,_store.today())
+    return actor,state,stock,daily
+
+
+@st.cache_data(show_spinner=False,max_entries=6)
+def parse_stock_report(raw):
+    return read_stock_report(raw)
+
+
+@st.cache_data(show_spinner=False,max_entries=6)
+def parse_history_report(raw):
+    return read_movement_report(raw)
+
+
+@contextmanager
+def branded_wait(message="Loading"):
+    holder=st.empty()
+    holder.markdown(loading_html(message),unsafe_allow_html=True)
+    try:
+        yield
+    finally:
+        holder.empty()
 
 
 @st.cache_data(show_spinner=False,ttl=120,max_entries=2)
@@ -79,6 +109,7 @@ def nonce(name):
 
 def success(name=None,message="Saved"):
     if name:st.session_state.pop("operation_"+name,None)
+    get_shell.clear(); get_analysis.clear()
     st.session_state["flash"]=t(message)
     st.session_state["wipe_passwords"]=True
     st.rerun()
@@ -146,7 +177,7 @@ def invoices_page(store,token,state,stock):
                 elif pending[draft_id]["payload"].get("items"):
                     st.info("This image already has a saved draft. Review it below; OCR was not repeated.")
                 else:
-                    with st.spinner(t("Reading")):
+                    with branded_wait("Reading"):
                         try:
                             result=extract_invoice_data(uploaded,stock)
                             result["movement_type"]=""  # the numeric reader cannot determine direction
@@ -310,7 +341,9 @@ def imports_panel(store,token,state,stock):
         uploaded=st.file_uploader(t("Upload stock"),type=["xlsx","xls"],key="stock_report")
         if uploaded:
             try:
-                df=read_stock_report(uploaded.getvalue())
+                raw=uploaded.getvalue()
+                with branded_wait("Reading report"):
+                    df=parse_stock_report(raw)
                 # Existing history can fill codes but never determines opening quantities.
                 history=store.movement_history(token)
                 if not history.empty:df=enrich_stock_codes(df,history)
@@ -322,14 +355,17 @@ def imports_panel(store,token,state,stock):
                     password=st.text_input(t("Approval password"),type="password",key="password_stock")
                     if st.form_submit_button(t("Import"),type="primary"):
                         if not confirmed:raise AppError("Confirm baseline")
-                        store.replace_stock(token,password,df,nonce("baseline"),state["revision"])
+                        with branded_wait("Importing stock"):
+                            store.replace_stock(token,password,df,nonce("baseline"),state["revision"])
                         success("baseline")
             except Exception as error:show_error(error)
     with st.expander(t("Upload history")):
         uploaded=st.file_uploader(t("Upload history"),type=["xlsx","xls"],key="history_report")
         if uploaded:
             try:
-                raw=uploaded.getvalue();df=read_movement_report(raw)
+                raw=uploaded.getvalue()
+                with branded_wait("Reading report"):
+                    df=parse_history_report(raw)
                 table(df.head(12));st.caption(f"{len(df):,} "+t("Movements"))
                 st.info(t("History hint"))
                 now=utcnow().astimezone(store.tz)
@@ -340,7 +376,8 @@ def imports_panel(store,token,state,stock):
                     password=st.text_input(t("Approval password"),type="password",key="password_history")
                     if st.form_submit_button(t("Import"),type="primary"):
                         as_of=datetime.combine(day,clock,tzinfo=store.tz)
-                        store.import_history(token,password,df,hashlib.sha256(raw).hexdigest(),as_of,nonce("history"))
+                        with branded_wait("Importing history"):
+                            store.import_history(token,password,df,hashlib.sha256(raw).hexdigest(),as_of,nonce("history"))
                         success("history")
             except Exception as error:show_error(error)
 
@@ -416,6 +453,17 @@ def settings_page(store,token,state,stock,actor):
 
 
 def main():
+    if "ui_language" not in st.session_state:
+        st.session_state["ui_language"]="ar"
+    selected_lang=st.segmented_control("Language / اللغة",["ar","en"],
+        default=st.session_state["ui_language"],format_func=lambda x:"العربية" if x=="ar" else "English",
+        key="language_switch",label_visibility="collapsed") or st.session_state["ui_language"]
+    if selected_lang!=st.session_state["ui_language"]:
+        st.session_state["ui_language"]=selected_lang
+        st.rerun()
+    set_language(st.session_state["ui_language"])
+    st.markdown(language_marker(),unsafe_allow_html=True)
+    st.markdown(brand_html(),unsafe_allow_html=True)
     if st.session_state.pop("wipe_passwords",False):
         for key in list(st.session_state):
             if key.startswith("password_") or key=="login_password":st.session_state.pop(key,None)
@@ -448,10 +496,10 @@ def main():
             st.caption(t("Cloud hint"))
         return
     try:
-        actor=store.actor(token)
-        state=store.state(token)
-        stock=store.stock(token)
-        daily=store.ledger(token,store.today())
+        database_id=str(store.engine.url.render_as_string(hide_password=True))
+        token_hash=hashlib.sha256(token.encode()).hexdigest()[:24]
+        with branded_wait("Loading data"):
+            actor,state,stock,daily=get_shell(database_id,token_hash,store,token)
     except AppError as error:
         st.session_state.pop("token",None);st.error(t(str(error)))
         if st.button(t("Sign in")):st.rerun()
@@ -463,7 +511,8 @@ def main():
     a,b,c=st.columns([5,1,1])
     stamp=aware(state["updated_at"]).astimezone(store.tz).strftime("%Y-%m-%d %H:%M:%S")
     a.markdown(status_html(actor,stamp),unsafe_allow_html=True)
-    if b.button(t("Refresh"),width="stretch",key="global_refresh"):st.rerun()
+    if b.button(t("Refresh"),width="stretch",key="global_refresh"):
+        get_shell.clear(); get_analysis.clear(); st.rerun()
     with c.popover(t("Account"),width="stretch"):
         st.write(actor["display_name"]+" / "+t(actor["role"]))
         if st.button(t("Sign out"),width="stretch"):
