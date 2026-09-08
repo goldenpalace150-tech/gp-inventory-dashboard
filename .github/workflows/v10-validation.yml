@@ -1,0 +1,103 @@
+name: V10 validation
+on:
+  push:
+    branches: [admin-delete-ui-v10]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply v10 source update
+        run: |
+          if grep -q 'GP-CLOUD-v10' gp_ui.py; then echo v10-ready; else python scripts/v10_update.py; fi
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+      - name: Compile
+        run: python -m compileall -q inventory_tracker.py gp_store.py gp_ui.py scripts
+      - name: Regression suite
+        run: |
+          python -m pip install 'pytest>=8,<10'
+          python -m pytest -o addopts='' -q
+      - name: Test invoice and movement deletion recalculation
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from gp_core import COL_CODE,COL_NAME,COL_QTY,ensure_unique_stock_keys
+          from gp_store import Store
+
+          s=Store.for_tests(); pw='Test-Password-2026'; s.initialize(password=pw); token=s.login('admin',pw)
+          stock=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:'010716',COL_NAME:'Camera',COL_QTY:10}]))
+          s.replace_stock(token,pw,stock,'base',s.state(token)['revision'],source_name='warehouse.xlsx')
+          key=s.stock(token).iloc[0]['مفتاح المخزون']
+          s.post(token,pw,[dict(item_key=key,movement_type='OUT',quantity=2)],'m1',reference='M1',reason='test',delivery_note=True)
+          s.post(token,pw,[dict(item_key=key,movement_type='OUT',quantity=3)],'inv1',source='INVOICE',reference='8042',image_hash='a'*64,reason='invoice',delivery_note=True,reviewed={'items':[]})
+          assert s.stock(token).iloc[0][COL_QTY]==5
+          s.delete_invoice(token,pw,'8042')
+          assert s.stock(token).iloc[0][COL_QTY]==8
+          ledger=s.ledger(token,s.today())
+          assert len(ledger)==1 and float(ledger.iloc[0]['quantity_after'])==8
+          op=s.deletion_catalog(token)['movements'][0]['operation_id']
+          s.delete_movement(token,pw,op)
+          assert s.stock(token).iloc[0][COL_QTY]==10
+          assert s.ledger(token,s.today()).empty
+          print('invoice/movement delete passed')
+          PY
+      - name: Test warehouse report deletion restore and safeguards
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from gp_core import COL_CODE,COL_NAME,COL_QTY,ensure_unique_stock_keys
+          from gp_store import Store,AppError
+          s=Store.for_tests(); pw='Test-Password-2026'; s.initialize(password=pw); token=s.login('admin',pw)
+          first=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:'A',COL_NAME:'Item A',COL_QTY:7}]))
+          second=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:'A',COL_NAME:'Item A',COL_QTY:12}]))
+          s.replace_stock(token,pw,first,'base1',s.state(token)['revision'],source_name='first.xlsx')
+          s.replace_stock(token,pw,second,'base2',s.state(token)['revision'],source_name='second.xlsx')
+          reports=s.deletion_catalog(token)['stock_reports']
+          assert reports[0]['source_name']=='second.xlsx'
+          s.delete_stock_report(token,pw,reports[0]['operation_id'])
+          assert s.stock(token).iloc[0][COL_QTY]==7
+          key=s.stock(token).iloc[0]['مفتاح المخزون']
+          s.post(token,pw,[dict(item_key=key,movement_type='IN',quantity=1)],'m2',reference='M2',reason='test')
+          report=s.deletion_catalog(token)['stock_reports'][0]
+          try:
+              s.delete_stock_report(token,pw,report['operation_id'])
+              raise AssertionError('expected safeguard')
+          except AppError as exc:
+              assert 'later movements' in str(exc)
+          print('warehouse report delete safeguards passed')
+          PY
+      - name: Test admin-only deletion and UI markers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import gp_ui
+          gp_ui.set_language('ar')
+          assert gp_ui.BUILD=='GP-CLOUD-v10'
+          assert gp_ui.t('Delete data')=='حذف البيانات'
+          css=Path('assets/style.css').read_text()
+          assert '.gp-loading-backdrop' in css and 'position:fixed' in css and 'align-items:center' in css and 'justify-content:center' in css
+          app=Path('inventory_tracker.py').read_text()
+          assert 'st.divider()' in app and 'deletion_panel' in app
+          print('UI markers passed')
+          PY
+      - name: Commit validated v10 source
+        if: github.event_name == 'push' && github.ref == 'refs/heads/admin-delete-ui-v10'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add inventory_tracker.py gp_store.py gp_ui.py assets/style.css
+          if git diff --cached --quiet; then
+            echo 'v10 source already committed'
+          else
+            git commit -m 'feat: add admin deletion controls and centered loader'
+            git push origin HEAD:admin-delete-ui-v10
+          fi
