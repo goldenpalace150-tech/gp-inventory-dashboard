@@ -1,0 +1,39 @@
+name: Encrypted inventory backup
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 0 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: gp-cloud-backup
+  cancel-in-progress: false
+jobs:
+  backup:
+    # Opt in explicitly; a fresh upload cannot silently enable a scheduled job.
+    if: vars.GP_BACKUP_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PGHOST: ${{ secrets.GP_DB_HOST }}
+      PGPORT: '5432'
+      PGUSER: ${{ secrets.GP_DB_USER }}
+      PGPASSWORD: ${{ secrets.GP_DB_PASSWORD }}
+      PGDATABASE: postgres
+      GP_BACKUP_KEY: ${{ secrets.GP_BACKUP_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install backup-only dependencies
+        run: python -m pip install -r requirements-backup.txt
+      - name: Export and encrypt
+        run: python scripts/backup.py --output backups
+      - name: Retain encrypted copy for 7 days
+        uses: actions/upload-artifact@v4
+        with:
+          name: gp-encrypted-${{ github.run_id }}
+          path: backups/*.gpbackup
+          if-no-files-found: error
+          retention-days: 7

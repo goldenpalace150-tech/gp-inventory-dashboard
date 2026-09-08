@@ -1,2184 +1,495 @@
-import streamlit as st
-import pandas as pd
-from PIL import Image, ImageOps, ImageEnhance
+"""Golden Palace cloud inventory, v5.
+Entry point: streamlit run inventory_tracker.py
+Python 3.11 / Supabase PostgreSQL. No local inventory fallback.
+"""
+from __future__ import annotations
+
+from datetime import datetime, time
+from pathlib import Path
+import gzip
+import hashlib
 import io
 import json
-import re
-import unicodedata
-import hashlib
-import os
-import sqlite3
+import logging
 import uuid
-from datetime import datetime
 
-try:
-    import easyocr
-    import numpy as np
-except Exception:
-    easyocr = None
-    np = None
+import pandas as pd
+import streamlit as st
+from PIL import Image
+from sqlalchemy.exc import SQLAlchemyError
 
-# ==========================================
-# PAGE CONFIGURATION & MOBILE-FRIENDLY RTL STYLING
-# ==========================================
-st.set_page_config(page_title="متتبع الجرد - القصر الذهبي", layout="wide")
-
-
-def app_secret(section, key, default=""):
-    try:
-        return st.secrets.get(section, {}).get(key, default)
-    except Exception:
-        return default
-
-
-DATABASE_PATH = str(
-    app_secret("inventory", "database_path", "inventory_tracker.db")
-).strip()
-
-# Free/local OCR. No API key or paid credits are required.
-# EasyOCR is installed with pip only, so Streamlit does not need packages.txt / apt.
-OCR_PREFERRED_LANGUAGES = ("ar", "en")
-OCR_ARABIC_DIGITS = str.maketrans(
-    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
-    "01234567890123456789",
+from gp_core import (
+    COL_CODE,COL_NAME,COL_QTY,COL_KEY,COL_MATCH,COL_DATE,
+    read_stock_report,read_movement_report,enrich_stock_codes,build_inventory_analysis,
 )
+from gp_store import Store, AppError, clean_json, utcnow, aware
+from gp_ui import BUILD, ROOT, t, css, brand_html, status_html, kpis_html, section_html
+from gp_ocr import free_ocr_status, extract_invoice_data
+from gp_invoice import match_invoice_lines
+from gp_reports import visible_frame, excel_bytes, day_report_sheets
+
+st.set_page_config(page_title=t("Golden Palace")+" | "+t("Stock"),
+                   page_icon=Image.open(ROOT/"assets/favicon.png"),layout="wide",initial_sidebar_state="collapsed")
+st.markdown("<style>"+css()+"</style>",unsafe_allow_html=True)
+st.markdown(brand_html(),unsafe_allow_html=True)
+LOG=logging.getLogger("golden_palace")
 
 
-def database_connection():
-    database_dir = os.path.dirname(os.path.abspath(DATABASE_PATH))
-    os.makedirs(database_dir, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, timeout=30)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
-def initialize_database():
-    with database_connection() as connection:
-        connection.executescript("""
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS stock_state (
-                item_key TEXT PRIMARY KEY,
-                item_code TEXT NOT NULL DEFAULT '',
-                item_name TEXT NOT NULL,
-                quantity REAL NOT NULL,
-                match_key TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS movement_ledger (
-                movement_id TEXT PRIMARY KEY,
-                operation_id TEXT NOT NULL,
-                operation_fingerprint TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                business_date TEXT NOT NULL,
-                username TEXT NOT NULL,
-                source TEXT NOT NULL,
-                movement_type TEXT NOT NULL,
-                item_key TEXT NOT NULL,
-                item_code TEXT NOT NULL DEFAULT '',
-                item_name TEXT NOT NULL,
-                quantity REAL NOT NULL,
-                quantity_before REAL NOT NULL,
-                quantity_after REAL NOT NULL,
-                invoice_reference TEXT NOT NULL DEFAULT '',
-                without_invoice INTEGER NOT NULL DEFAULT 0,
-                delivery_note INTEGER NOT NULL DEFAULT 0,
-                reason TEXT NOT NULL DEFAULT ''
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_movement_fingerprint
-                ON movement_ledger(operation_fingerprint, item_key, movement_type);
-            CREATE TABLE IF NOT EXISTS posted_invoices (
-                invoice_reference TEXT PRIMARY KEY,
-                image_hash TEXT NOT NULL UNIQUE,
-                operation_id TEXT NOT NULL,
-                posted_at TEXT NOT NULL,
-                username TEXT NOT NULL,
-                recognized_json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS imported_movement_history (
-                row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item_code TEXT,
-                item_name TEXT,
-                movement_date TEXT,
-                reference TEXT,
-                customer TEXT,
-                qty_in REAL,
-                qty_out REAL,
-                balance REAL,
-                username TEXT,
-                statement TEXT,
-                match_key TEXT
-            );
-            CREATE TABLE IF NOT EXISTS app_metadata (
-                meta_key TEXT PRIMARY KEY,
-                meta_value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS daily_closures (
-                business_date TEXT PRIMARY KEY,
-                closed_at TEXT NOT NULL,
-                username TEXT NOT NULL,
-                movement_count INTEGER NOT NULL,
-                total_in REAL NOT NULL,
-                total_out REAL NOT NULL,
-                no_invoice_count INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS daily_stock_snapshots (
-                business_date TEXT NOT NULL,
-                item_key TEXT NOT NULL,
-                item_code TEXT NOT NULL DEFAULT '',
-                item_name TEXT NOT NULL,
-                quantity REAL NOT NULL,
-                match_key TEXT NOT NULL,
-                PRIMARY KEY (business_date, item_key)
-            );
-        """)
-
-
-initialize_database()
-
-st.markdown("""
-    <style>
-        .stApp {
-            direction: rtl;
-            text-align: right;
-            background: #f4f7fb;
-        }
-        /* Fix mobile text vertical stacking/wrapping issues */
-        h1, h2, h3, h4, p, span, label, div {
-            word-break: normal !important;
-            overflow-wrap: break-word !important;
-            text-align: right;
-        }
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 6px;
-            flex-wrap: wrap;
-            background: white;
-            border: 1px solid #dce5f0;
-            border-radius: 14px;
-            padding: 5px;
-        }
-        .stTabs [data-baseweb="tab"] {
-            background-color: transparent;
-            border-radius: 10px;
-            padding: 10px 18px;
-            font-size: 14px;
-            min-height: 44px;
-        }
-        .stTabs [aria-selected="true"] { background: #eaf1ff !important; color: #1d4ed8 !important; }
-        table { width: 100% !important; font-size: 13px !important; }
-        .block-container { max-width: 1450px; padding-top: 1.2rem; padding-bottom: 2rem; }
-        div[data-testid="stMetric"] {
-            background: white;
-            border: 1px solid #dce5f0;
-            border-radius: 14px;
-            padding: 14px;
-            box-shadow: 0 4px 14px rgba(15, 23, 42, .04);
-        }
-        div[data-testid="stForm"], div[data-testid="stExpander"] {
-            background: white;
-            border: 1px solid #dce5f0 !important;
-            border-radius: 14px !important;
-        }
-        .gp-hero {
-            background: linear-gradient(115deg, #14264a, #245bd8);
-            color: white;
-            padding: 20px 24px;
-            border-radius: 18px;
-            margin-bottom: 14px;
-            box-shadow: 0 10px 28px rgba(30, 64, 175, .18);
-        }
-        .gp-hero-title { font-size: 25px; font-weight: 800; }
-        .gp-hero-sub { opacity: .82; margin-top: 4px; }
-        @media (max-width: 700px) {
-            .block-container { padding-left: 10px; padding-right: 10px; }
-            .stTabs [data-baseweb="tab"] { padding: 8px 9px; font-size: 12px; }
-            .gp-hero { padding: 16px; }
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-st.markdown(
-    '<div class="gp-hero"><div class="gp-hero-title">القصر الذهبي · إدارة المخزون</div>'
-    '<div class="gp-hero-sub">حركة فورية، تدقيق الفواتير، إعادة الطلب وتقارير نهاية اليوم</div></div>',
-    unsafe_allow_html=True,
-)
-
-# ==========================================
-# SESSION STATE INITIALIZATION
-# ==========================================
-if 'live_stock' not in st.session_state:
-    st.session_state['live_stock'] = None
-if 'processed_invoices' not in st.session_state:
-    st.session_state['processed_invoices'] = {}
-if 'invoice_raw_data' not in st.session_state:
-    st.session_state['invoice_raw_data'] = {}
-if 'file_to_invoice' not in st.session_state:
-    st.session_state['file_to_invoice'] = {}
-if 'movement_history' not in st.session_state:
-    st.session_state['movement_history'] = None
-if 'manual_movements' not in st.session_state:
-    st.session_state['manual_movements'] = []
-if 'manual_movement_flash' not in st.session_state:
-    st.session_state['manual_movement_flash'] = None
-if 'recognized_invoices' not in st.session_state:
-    st.session_state['recognized_invoices'] = {}
-if 'manual_operation_nonce' not in st.session_state:
-    st.session_state['manual_operation_nonce'] = str(uuid.uuid4())
-if 'movement_file_hash' not in st.session_state:
-    st.session_state['movement_file_hash'] = None
-
-# Default user database managed by Admin
-if 'user_db' not in st.session_state:
-    st.session_state['user_db'] = {
-        "admin": {"password": "123", "role": "مدير النظام (Admin)"},
-        "store": {"password": "123", "role": "أمين مخزن (Storekeeper)"}
-    }
-
-if 'logged_in_user' not in st.session_state:
-    st.session_state['logged_in_user'] = None
-
-# ==========================================
-# 🔐 SIDEBAR: AUTHENTICATION & USER MANAGEMENT
-# ==========================================
-st.sidebar.header("🔐 نظام تسجيل الدخول والصلاحيات")
-
-if st.session_state['logged_in_user'] is None:
-    with st.sidebar.form("login_form"):
-        username_input = st.text_input("اسم المستخدم")
-        password_input = st.text_input("كلمة المرور", type="password")
-        login_btn = st.form_submit_button("تسجيل الدخول", use_container_width=True)
-        
-        if login_btn:
-            if username_input in st.session_state['user_db'] and st.session_state['user_db'][username_input]["password"] == password_input:
-                st.session_state['logged_in_user'] = username_input
-                st.rerun()
-            else:
-                st.sidebar.error("اسم المستخدم أو كلمة المرور غير صحيحة.")
-else:
-    current_user = st.session_state['logged_in_user']
-    current_role = st.session_state['user_db'][current_user]["role"]
-    
-    st.sidebar.success(f"مرحباً: {current_user}")
-    st.sidebar.info(f"الصلاحية: {current_role}")
-    st.sidebar.success("● الحفظ التلقائي للحركات فعال")
-    st.sidebar.caption("يبقى تسجيل الدخول فعالاً حتى تضغط تسجيل الخروج.")
-    
-    if st.sidebar.button("تسجيل الخروج", use_container_width=True):
-        st.session_state['logged_in_user'] = None
-        st.rerun()
-
-    if current_role == "مدير النظام (Admin)":
-        st.sidebar.divider()
-        st.sidebar.subheader("👥 إضافة مستخدم جديد")
-        with st.sidebar.form("new_user_form"):
-            new_username = st.text_input("اسم المستخدم الجديد")
-            new_password = st.text_input("كلمة المرور", type="password")
-            new_role = st.selectbox("الصلاحية", ["أمين مخزن (Storekeeper)", "مدير النظام (Admin)"])
-            add_user_btn = st.form_submit_button("إضافة المستخدم", use_container_width=True)
-            
-            if add_user_btn:
-                if new_username and new_password:
-                    st.session_state['user_db'][new_username] = {"password": new_password, "role": new_role}
-                    st.sidebar.success(f"تمت إضافة المستخدم {new_username} بنجاح!")
-                else:
-                    st.sidebar.warning("يرجى ملء كافة الحقول.")
-
-is_admin = (st.session_state['logged_in_user'] is not None and st.session_state['user_db'][st.session_state['logged_in_user']]["role"] == "مدير النظام (Admin)")
-
-st.divider()
-
-if st.session_state['logged_in_user'] is None:
-    st.warning("⚠️ يرجى تسجيل الدخول من القائمة الجانبية لعرض لوحة التحكم.")
-    st.stop()
-
-# ==========================================
-# FREE / LOCAL INVOICE PHOTO RECOGNITION
-# ==========================================
-def free_ocr_status():
-    """Return whether the free pip-only EasyOCR engine can be used."""
-    if easyocr is None or np is None:
-        return False, "", "مكتبة EasyOCR غير مثبتة"
-    return True, "+".join(OCR_PREFERRED_LANGUAGES), "EasyOCR مجاني (Arabic + English)"
+def show_error(error):
+    if isinstance(error,AppError):
+        st.error(t(str(error)))
+    else:
+        reference=str(uuid.uuid4())[:8]
+        sqlstate=getattr(getattr(error,"orig",None),"sqlstate","")
+        # No repr/traceback of a database error: it may include secrets or invoice data.
+        LOG.error("App failure id=%s type=%s sqlstate=%s",reference,type(error).__name__,sqlstate)
+        st.error("Save/connection not confirmed. Refresh the data before retrying. "
+                 "No local database is used. Reference: "+reference)
 
 
 @st.cache_resource(show_spinner=False)
-def get_ocr_reader():
-    """Load the OCR model once per Streamlit process."""
-    if easyocr is None:
-        raise RuntimeError("EasyOCR غير مثبتة")
-    # CPU mode keeps the app free and works on Streamlit Community Cloud.
-    return easyocr.Reader(
-        list(OCR_PREFERRED_LANGUAGES),
-        gpu=False,
-        verbose=False,
-        quantize=False,
-    )
-
-
-def _ocr_clean_text(value):
-    text = str(value or "").translate(OCR_ARABIC_DIGITS)
-    return (
-        text.replace("\u200f", "")
-        .replace("\u200e", "")
-        .replace("\ufeff", "")
-        .strip()
-    )
-
-
-def _prepare_ocr_image(image, target_long_side=2200, min_scale=1.4, max_scale=3.2):
-    """Improve contrast/shadows and upscale phone photos for OCR."""
-    gray = ImageOps.grayscale(image)
-    gray = ImageOps.autocontrast(gray, cutoff=1)
-    gray = ImageEnhance.Contrast(gray).enhance(1.25)
-    longest = max(gray.size)
-    scale = max(min_scale, min(max_scale, target_long_side / max(1, longest)))
-    prepared = gray.resize(
-        (max(1, int(gray.width * scale)), max(1, int(gray.height * scale))),
-        Image.Resampling.LANCZOS,
-    )
-    return prepared, scale
-
-
-def _easy_read(image, allowlist=None, paragraph=False):
-    """Run EasyOCR and normalize its output to (bbox, text, confidence)."""
-    reader = get_ocr_reader()
-    array = np.array(image)
-    kwargs = {
-        "detail": 1,
-        "paragraph": paragraph,
-        "decoder": "greedy",
-    }
-    if allowlist:
-        kwargs["allowlist"] = allowlist
-    results = reader.readtext(array, **kwargs)
-    normalized = []
-    for result in results:
-        if not isinstance(result, (list, tuple)) or len(result) < 3:
-            continue
-        bbox, value, confidence = result[0], result[1], result[2]
-        try:
-            confidence = float(confidence)
-        except Exception:
-            confidence = 0.0
-        normalized.append((bbox, _ocr_clean_text(value), confidence))
-    return normalized
-
-
-def _extract_number_candidates(text):
-    clean = _ocr_clean_text(text).replace(",", ".")
-    return re.findall(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", clean)
-
-
-def _read_quantity_crop(image, row_center_y, ocr_language):
-    """Read the quantity column for a detected item row on Golden Palace forms."""
-    width, height = image.size
-    half_height = max(22, int(height * 0.030))
-    crop = image.crop((
-        int(width * 0.20),
-        max(0, int(row_center_y - half_height)),
-        int(width * 0.37),
-        min(height, int(row_center_y + half_height)),
-    ))
-    prepared, _ = _prepare_ocr_image(
-        crop, target_long_side=950, min_scale=3.0, max_scale=5.0
-    )
-    candidates = []
-    for _, text, conf in _easy_read(prepared, allowlist="0123456789.,"):
-        if conf < 0.15:
-            continue
-        for token in _extract_number_candidates(text):
-            try:
-                value = float(token)
-            except ValueError:
-                continue
-            if 0 < value < 100000:
-                candidates.append((token, value, conf))
-    if not candidates:
-        return None
-    decimal_candidates = [row for row in candidates if "." in row[0] or "," in row[0]]
-    pool = decimal_candidates or candidates
-    pool.sort(key=lambda row: row[2], reverse=True)
-    return round(float(pool[0][1]), 4)
-
-
-def _read_invoice_reference(image, last_item_y, ocr_language):
-    """Read the reference/invoice number from the summary block below the item table."""
-    width, height = image.size
-    start_y = int(min(height * 0.72, last_item_y + height * 0.020))
-    end_y = int(min(height * 0.79, last_item_y + height * 0.18))
-    if end_y <= start_y:
-        start_y, end_y = int(height * 0.45), int(height * 0.72)
-    crop = image.crop((0, start_y, int(width * 0.60), end_y))
-    prepared, _ = _prepare_ocr_image(
-        crop, target_long_side=1400, min_scale=2.5, max_scale=4.5
-    )
-    pieces = _easy_read(prepared, allowlist="0123456789")
-    candidates = []
-    for _, value, conf in pieces:
-        for token in re.findall(r"(?<!\d)(\d{3,8})(?!\d)", value):
-            candidates.append((token, conf))
-    candidates.sort(key=lambda row: row[1], reverse=True)
-    joined = " | ".join(value for _, value, _ in pieces)
-    return (candidates[0][0], joined) if candidates else ("", joined)
-
-
-def _read_summary_total(image, last_item_y, ocr_language):
-    width, height = image.size
-    start_y = int(min(height * 0.72, last_item_y + height * 0.02))
-    end_y = int(min(height * 0.79, last_item_y + height * 0.18))
-    crop = image.crop((0, start_y, int(width * 0.62), end_y))
-    prepared, _ = _prepare_ocr_image(
-        crop, target_long_side=1400, min_scale=2.5, max_scale=4.5
-    )
-    values = []
-    for _, text, conf in _easy_read(prepared, allowlist="0123456789.,"):
-        if conf < 0.10:
-            continue
-        for token in _extract_number_candidates(text):
-            try:
-                value = float(token)
-            except ValueError:
-                continue
-            if 0 < value < 100000:
-                values.append(value)
-    return values
-
-
-def extract_invoice_data(uploaded_file, stock_df=None):
-    """Read a Golden Palace invoice locally with EasyOCR; no paid API is used."""
-    ocr_ok, ocr_language, ocr_info = free_ocr_status()
-    if not ocr_ok:
-        raise RuntimeError(
-            f"محرك OCR المجاني غير جاهز: {ocr_info}. "
-            "تأكد من requirements.txt ولا تضف packages.txt."
-        )
-
-    image_bytes = uploaded_file.getvalue()
-    image = ImageOps.exif_transpose(
-        Image.open(io.BytesIO(image_bytes))
-    ).convert("RGB")
-    width, height = image.size
-
-    full_prepared, _ = _prepare_ocr_image(image)
-    full_results = _easy_read(full_prepared)
-    full_text = "\n".join(value for _, value, _ in full_results)
-    normalized_full_text = normalize_item_name(_ocr_clean_text(full_text))
-
-    out_roots = ("إخرا", "اخرا", "تسليم", "مبيعات", "بيع")
-    in_roots = ("إدخال", "ادخال", "شراء", "مرتجع", "استلام مواد")
-    detected_out = any(root in normalized_full_text for root in out_roots)
-    detected_in = any(root in normalized_full_text for root in in_roots)
-    if detected_out and not detected_in:
-        movement_type = "OUT"
-        movement_detected = True
-    elif detected_in and not detected_out:
-        movement_type = "IN"
-        movement_detected = True
-    else:
-        movement_type = "OUT"
-        movement_detected = False
-
-    stock_code_map = {}
-    if stock_df is not None and not stock_df.empty:
-        for _, row in stock_df.iterrows():
-            code = normalize_item_code(row.get("رمز المادة", ""))
-            if code:
-                stock_code_map[code] = str(row.get("اسم المادة", "") or "").strip()
-
-    # Item code column on the right side of the Golden Palace form.
-    code_x0, code_x1 = int(width * 0.76), width
-    code_y0, code_y1 = int(height * 0.28), int(height * 0.66)
-    code_crop = image.crop((code_x0, code_y0, code_x1, code_y1))
-    code_prepared, code_scale = _prepare_ocr_image(
-        code_crop, target_long_side=1800, min_scale=3.0, max_scale=5.0
-    )
-    code_results = _easy_read(code_prepared, allowlist="0123456789")
-
-    detected_rows = []
-    for bbox, token, token_conf in code_results:
-        digits = re.sub(r"\D", "", _ocr_clean_text(token))
-        if not (4 <= len(digits) <= 12) or token_conf < 0.15:
-            continue
-        try:
-            ys = [float(point[1]) for point in bbox]
-            row_center_y = code_y0 + (sum(ys) / len(ys)) / code_scale
-        except Exception:
-            continue
-        detected_rows.append({
-            "code": digits,
-            "center_y": row_center_y,
-            "ocr_conf": token_conf,
-        })
-
-    unique_rows = []
-    for row in sorted(detected_rows, key=lambda item: item["center_y"]):
-        if unique_rows and abs(row["center_y"] - unique_rows[-1]["center_y"]) < height * 0.012:
-            if row["ocr_conf"] > unique_rows[-1]["ocr_conf"]:
-                unique_rows[-1] = row
-            continue
-        unique_rows.append(row)
-
-    warnings = []
-    items = []
-    matched_stock_count = 0
-    quantity_count = 0
-    for row in unique_rows:
-        code = normalize_item_code(row["code"])
-        quantity = _read_quantity_crop(image, row["center_y"], ocr_language)
-        item_name = stock_code_map.get(code, "")
-        if item_name:
-            matched_stock_count += 1
-        elif stock_code_map:
-            warnings.append(
-                f"الرمز {code} قُرئ من الصورة لكنه غير موجود تماماً في المخزون الحالي؛ راجعه يدوياً."
-            )
-        if quantity is not None:
-            quantity_count += 1
-        else:
-            warnings.append(f"تعذر تثبيت كمية الرمز {code}؛ أدخل الكمية يدوياً قبل الاعتماد.")
-        items.append({
-            "item_code": code,
-            "item_name": item_name,
-            "quantity": quantity,
-        })
-
-    if not items:
-        warnings.append(
-            "لم يلتقط OCR أي رمز مادة موثوق من العمود الأيمن. جرّب صورة أقرب وأكثر استقامة."
-        )
-
-    last_item_y = max((row["center_y"] for row in unique_rows), default=height * 0.48)
-    invoice_number, reference_ocr_text = _read_invoice_reference(
-        image, last_item_y, ocr_language
-    )
-    if not invoice_number:
-        warnings.append("لم يتم تثبيت رقم الفاتورة/المرجع؛ اكتبه يدوياً قبل الاعتماد.")
-
-    if not movement_detected:
-        warnings.append(
-            "نوع الحركة لم يُحسم من النص؛ تم اختيار OUT مؤقتاً. راجع خيار إدخال/إخراج قبل الاعتماد."
-        )
-
-    total_candidates = _read_summary_total(image, last_item_y, ocr_language)
-    item_total = sum(
-        float(item["quantity"])
-        for item in items
-        if item.get("quantity") is not None
-    )
-    total_match = False
-    if items and quantity_count == len(items) and total_candidates:
-        total_match = any(abs(value - item_total) < 0.001 for value in total_candidates)
-        if not total_match:
-            warnings.append(
-                f"مجموع السطور المقروءة ({item_total:g}) لا يطابق بوضوح مجموع الكميات في أسفل المستند؛ راجع السطور."
-            )
-
-    row_count = max(1, len(items))
-    quantity_ratio = quantity_count / row_count if items else 0
-    if stock_code_map and items:
-        stock_ratio = matched_stock_count / row_count
-    elif items:
-        stock_ratio = 0.5
-    else:
-        stock_ratio = 0
-
-    confidence = 0.15 if items else 0
-    confidence += 0.35 * quantity_ratio
-    confidence += 0.20 * stock_ratio
-    confidence += 0.15 if invoice_number else 0
-    confidence += 0.10 if movement_detected else 0
-    confidence += 0.05 if total_match else 0
-    confidence = max(0.0, min(1.0, confidence))
-
-    return {
-        "invoice_number": invoice_number,
-        "movement_type": movement_type,
-        "confidence": confidence,
-        "items": items,
-        "warnings": warnings,
-        "image_hash": hashlib.sha256(image_bytes).hexdigest(),
-        "source_name": getattr(uploaded_file, "name", "invoice-photo.jpg"),
-        "ocr_engine": ocr_info,
-        "ocr_text": _ocr_clean_text(full_text),
-        "reference_ocr_text": reference_ocr_text,
-    }
-
-def normalize_item_name(value):
-    """Normalize Ameen item names without changing the displayed Arabic text."""
-    text = unicodedata.normalize("NFKC", str(value or ""))
-    text = text.replace('"', '').replace("'", "")
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def normalize_item_code(value):
-    if pd.isna(value):
-        return ""
-    text = str(value).strip()
-    return text[:-2] if text.endswith(".0") else text
-
-
-def split_movement_item(value):
-    """Split codes such as SG05LP3-EU-SM2-اسم المادة safely."""
-    text = str(value or "").strip()
-    match = re.match(r"^\s*(.*?)\s*-\s*(?=[\u0600-\u06FF])(.+)$", text)
-    if match:
-        return normalize_item_code(match.group(1)), match.group(2).strip()
-    return "", text
-
-
-@st.cache_data(show_spinner=False)
-def read_stock_report(file_bytes):
-    """Read both the original 2-column report and older code/name/qty reports."""
-    excel = pd.ExcelFile(io.BytesIO(file_bytes))
-    for sheet_name in excel.sheet_names:
-        for header_row in (0, 1, 2):
-            candidate = pd.read_excel(
-                io.BytesIO(file_bytes), sheet_name=sheet_name, header=header_row
-            )
-            columns = {str(column).strip(): column for column in candidate.columns}
-            name_col = next(
-                (columns[key] for key in columns if "اسم المادة" in key), None
-            )
-            qty_col = next(
-                (columns[key] for key in columns if key == "الكمية"), None
-            )
-            code_col = next(
-                (columns[key] for key in columns if "رمز المادة" in key), None
-            )
-            if name_col is None or qty_col is None:
-                continue
-            result = pd.DataFrame({
-                "رمز المادة": (
-                    candidate[code_col].map(normalize_item_code)
-                    if code_col is not None
-                    else ""
-                ),
-                "اسم المادة": candidate[name_col].astype(str).str.strip('"'),
-                "الكمية": pd.to_numeric(candidate[qty_col], errors="coerce").fillna(0),
-            })
-            result = result[
-                candidate[name_col].notna()
-                & result["اسم المادة"].astype(str).str.strip().ne("")
-            ].copy()
-            result["مفتاح المطابقة"] = result["اسم المادة"].map(normalize_item_name)
-            result = result.reset_index(drop=True)
-            base_keys = result.apply(
-                lambda row: (
-                    f"CODE:{normalize_item_code(row['رمز المادة'])}"
-                    if normalize_item_code(row['رمز المادة'])
-                    else f"NAME:{row['مفتاح المطابقة']}"
-                ),
-                axis=1,
-            )
-            duplicate_number = base_keys.groupby(base_keys).cumcount()
-            result["مفتاح المخزون"] = [
-                base_key if number == 0 else f"{base_key}#{number + 1}"
-                for base_key, number in zip(base_keys, duplicate_number)
-            ]
-            return result
-    raise ValueError("لم يتم العثور على أعمدة اسم المادة والكمية في تقرير الجرد.")
-
-
-@st.cache_data(show_spinner=False)
-def read_movement_report(file_bytes):
-    """Read the Ameen item-movement report by its stable column positions."""
-    excel = pd.ExcelFile(io.BytesIO(file_bytes))
-    sheet_name = next(
-        (name for name in excel.sheet_names if "حركة" in str(name)),
-        excel.sheet_names[0],
-    )
-    raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name, header=1)
-    if raw.shape[1] < 9:
-        raise ValueError("تقرير حركة المادة لا يحتوي على أعمدة الإدخال والإخراج المطلوبة.")
-    parsed_items = raw.iloc[:, 0].map(split_movement_item)
-    movement = pd.DataFrame({
-        "رمز المادة": parsed_items.map(lambda item: item[0]),
-        "اسم المادة": parsed_items.map(lambda item: item[1]),
-        "التاريخ": pd.to_datetime(raw.iloc[:, 1], errors="coerce"),
-        "المرجع": raw.iloc[:, 2].fillna("").astype(str).str.strip(),
-        "الزبون": raw.iloc[:, 3].fillna("").astype(str).str.strip(),
-        "إدخال": pd.to_numeric(raw.iloc[:, 4], errors="coerce").fillna(0),
-        "إخراج": pd.to_numeric(raw.iloc[:, 6], errors="coerce").fillna(0),
-        "الرصيد": pd.to_numeric(raw.iloc[:, 8], errors="coerce"),
-        "المستخدم": raw.iloc[:, 10].fillna("").astype(str).str.strip()
-            if raw.shape[1] > 10 else "",
-        "بيان": raw.iloc[:, 13].fillna("").astype(str).str.strip()
-            if raw.shape[1] > 13 else "",
-    })
-    movement = movement[movement["التاريخ"].notna()].copy()
-    movement["مفتاح المطابقة"] = movement["اسم المادة"].map(normalize_item_name)
-    return movement.reset_index(drop=True)
-
-
-def enrich_stock_codes(stock_df, movement_df):
-    """Fill missing stock codes from exact normalized-name matches."""
-    stock = stock_df.copy()
-    if movement_df is None or movement_df.empty:
-        return stock
-    code_map = (
-        movement_df[movement_df["رمز المادة"].ne("")]
-        .drop_duplicates("مفتاح المطابقة")
-        .set_index("مفتاح المطابقة")["رمز المادة"]
-    )
-    missing_code = stock["رمز المادة"].fillna("").astype(str).str.strip().eq("")
-    stock.loc[missing_code, "رمز المادة"] = (
-        stock.loc[missing_code, "مفتاح المطابقة"].map(code_map).fillna("")
-    )
-    return stock
-
-
-def build_inventory_analysis(
-    stock_df,
-    movement_df,
-    lead_days,
-    safety_days,
-    slow_days,
-    demand_window_days=90,
-    review_days=30,
-    purchase_prefixes=None,
-):
-    """Build a purchase-aware reorder plan from demand, stock and supply history."""
-    if movement_df is None or movement_df.empty:
-        return pd.DataFrame()
-
-    movement_df = movement_df.copy()
-    movement_df["التاريخ"] = pd.to_datetime(
-        movement_df["التاريخ"], errors="coerce"
-    )
-    movement_df = movement_df[movement_df["التاريخ"].notna()].copy()
-    end_date = movement_df["التاريخ"].max().normalize()
-    demand_window_days = max(7, int(demand_window_days))
-    review_days = max(1, int(review_days))
-    recent_start = end_date - pd.Timedelta(days=demand_window_days - 1)
-    prior_end = recent_start - pd.Timedelta(days=1)
-    prior_start = prior_end - pd.Timedelta(days=demand_window_days - 1)
-
-    purchase_prefixes = tuple(
-        prefix.strip()
-        for prefix in (purchase_prefixes or ("إد.م. م. م.",))
-        if str(prefix).strip()
-    )
-
-    grouped = movement_df.groupby("مفتاح المطابقة", as_index=False).agg(
-        **{
-            "رمز الحركة": ("رمز المادة", "first"),
-            "اسم الحركة": ("اسم المادة", "first"),
-            "إجمالي الإدخال": ("إدخال", "sum"),
-            "إجمالي الإخراج": ("إخراج", "sum"),
-            "عدد الحركات": ("التاريخ", "count"),
-            "آخر حركة": ("التاريخ", "max"),
-        }
-    )
-    last_out = (
-        movement_df[movement_df["إخراج"] > 0]
-        .groupby("مفتاح المطابقة")["التاريخ"]
-        .max()
-    )
-    grouped["آخر إخراج"] = grouped["مفتاح المطابقة"].map(last_out)
-
-    recent_out = (
-        movement_df[
-            (movement_df["إخراج"] > 0)
-            & (movement_df["التاريخ"] >= recent_start)
-            & (movement_df["التاريخ"] < end_date + pd.Timedelta(days=1))
-        ]
-        .groupby("مفتاح المطابقة")["إخراج"]
-        .sum()
-    )
-    prior_out = (
-        movement_df[
-            (movement_df["إخراج"] > 0)
-            & (movement_df["التاريخ"] >= prior_start)
-            & (movement_df["التاريخ"] < recent_start)
-        ]
-        .groupby("مفتاح المطابقة")["إخراج"]
-        .sum()
-    )
-    grouped[f"خروج آخر {demand_window_days} يوم"] = (
-        grouped["مفتاح المطابقة"].map(recent_out).fillna(0)
-    )
-    grouped["خروج الفترة السابقة"] = (
-        grouped["مفتاح المطابقة"].map(prior_out).fillna(0)
-    )
-
-    reference = movement_df["المرجع"].fillna("").astype(str).str.strip()
-    if purchase_prefixes:
-        purchase_mask = (
-            (movement_df["إدخال"] > 0)
-            & reference.str.startswith(purchase_prefixes)
-        )
-    else:
-        purchase_mask = pd.Series(False, index=movement_df.index)
-    purchases = movement_df[purchase_mask].copy()
-    if not purchases.empty:
-        purchases["يوم الشراء"] = purchases["التاريخ"].dt.normalize()
-        purchase_daily = (
-            purchases.groupby(["مفتاح المطابقة", "يوم الشراء"], as_index=False)["إدخال"]
-            .sum()
-            .sort_values(["مفتاح المطابقة", "يوم الشراء"])
-        )
-        purchase_summary_rows = []
-        for item_key, item_purchases in purchase_daily.groupby("مفتاح المطابقة"):
-            unique_dates = item_purchases["يوم الشراء"].sort_values()
-            gaps = unique_dates.diff().dt.days.dropna()
-            last_row = item_purchases.iloc[-1]
-            purchase_summary_rows.append({
-                "مفتاح المطابقة": item_key,
-                "آخر شراء/توريد": last_row["يوم الشراء"],
-                "كمية آخر شراء/توريد": float(last_row["إدخال"]),
-                "عدد مرات الشراء/التوريد": int(len(item_purchases)),
-                "متوسط فترة التوريد": (
-                    float(gaps.mean()) if not gaps.empty else float("nan")
-                ),
-            })
-        purchase_summary = pd.DataFrame(purchase_summary_rows)
-        grouped = grouped.merge(
-            purchase_summary, on="مفتاح المطابقة", how="left"
-        )
-    else:
-        grouped["آخر شراء/توريد"] = pd.NaT
-        grouped["كمية آخر شراء/توريد"] = 0.0
-        grouped["عدد مرات الشراء/التوريد"] = 0
-        grouped["متوسط فترة التوريد"] = float("nan")
-
-    stock_view = stock_df[["مفتاح المطابقة", "رمز المادة", "اسم المادة", "الكمية"]].copy()
-    analysis = stock_view.merge(grouped, on="مفتاح المطابقة", how="left")
-    analysis["رمز المادة"] = analysis["رمز المادة"].where(
-        analysis["رمز المادة"].astype(str).str.strip().ne(""),
-        analysis["رمز الحركة"],
-    ).fillna("")
-    numeric_columns = (
-        "إجمالي الإدخال", "إجمالي الإخراج", "عدد الحركات",
-        f"خروج آخر {demand_window_days} يوم", "خروج الفترة السابقة",
-        "كمية آخر شراء/توريد", "عدد مرات الشراء/التوريد",
-    )
-    for column in numeric_columns:
-        analysis[column] = pd.to_numeric(analysis[column], errors="coerce").fillna(0)
-
-    recent_column = f"خروج آخر {demand_window_days} يوم"
-    analysis["الخروج اليومي الحديث"] = analysis[recent_column] / demand_window_days
-    analysis["متوسط الخروج اليومي"] = analysis["الخروج اليومي الحديث"]
-    recent_rate = analysis[recent_column] / demand_window_days
-    prior_rate = analysis["خروج الفترة السابقة"] / demand_window_days
-    trend_ratio = recent_rate / prior_rate.replace(0, pd.NA)
-    analysis["اتجاه الطلب"] = "مستقر"
-    analysis.loc[(prior_rate <= 0) & (recent_rate > 0), "اتجاه الطلب"] = "صاعد"
-    analysis.loc[trend_ratio >= 1.25, "اتجاه الطلب"] = "صاعد"
-    analysis.loc[(trend_ratio <= 0.75) & (recent_rate > 0), "اتجاه الطلب"] = "هابط"
-    analysis.loc[recent_rate <= 0, "اتجاه الطلب"] = "بدون طلب حديث"
-    demand = analysis["إجمالي الإخراج"].sort_values(ascending=False)
-    total_demand = demand.sum()
-    if total_demand > 0:
-        cumulative_before = demand.cumsum().shift(fill_value=0) / total_demand
-        abc = pd.Series("بطيئة", index=demand.index)
-        abc.loc[cumulative_before < 0.95] = "متوسطة"
-        abc.loc[cumulative_before < 0.80] = "سريعة"
-        analysis["سرعة الحركة"] = abc.reindex(analysis.index)
-    else:
-        analysis["سرعة الحركة"] = "بدون حركة"
-    analysis.loc[analysis["إجمالي الإخراج"] <= 0, "سرعة الحركة"] = "بدون حركة"
-
-    analysis["أيام منذ آخر خروج"] = (
-        end_date.normalize() - pd.to_datetime(analysis["آخر إخراج"])
-    ).dt.days
-    analysis["أيام منذ آخر شراء/توريد"] = (
-        end_date - pd.to_datetime(analysis["آخر شراء/توريد"])
-    ).dt.days
-    analysis["تغطية المخزون بالأيام"] = (
-        analysis["الكمية"] / recent_rate.replace(0, float("nan"))
-    ).clip(lower=0).astype(float).round(1)
-    analysis["مخزون الأمان"] = (recent_rate * safety_days).round().astype(int)
-    analysis["حد إعادة الطلب"] = (
-        recent_rate * lead_days + analysis["مخزون الأمان"]
-    ).round().astype(int)
-    target_days = lead_days + safety_days + review_days
-    analysis["كمية الطلب المقترحة"] = (
-        recent_rate * target_days - analysis["الكمية"]
-    ).clip(lower=0).round().astype(int)
-
-    cover = analysis["تغطية المخزون بالأيام"]
-    has_recent_demand = analysis[recent_column] > 0
-    critical = has_recent_demand & (
-        (analysis["الكمية"] <= 0) | (cover <= lead_days)
-    )
-    high = has_recent_demand & ~critical & (
-        (analysis["الكمية"] <= analysis["حد إعادة الطلب"])
-        | (cover <= lead_days + safety_days)
-    )
-    watch = has_recent_demand & ~critical & ~high & (
-        (analysis["اتجاه الطلب"] == "صاعد")
-        & (cover <= target_days)
-    )
-    analysis["أولوية الطلب"] = "لا يحتاج"
-    analysis.loc[watch, "أولوية الطلب"] = "مراقبة"
-    analysis.loc[high, "أولوية الطلب"] = "عالية"
-    analysis.loc[critical, "أولوية الطلب"] = "حرجة"
-    analysis["حالة الطلب"] = "لا يحتاج"
-    reorder_mask = critical | high | watch
-    analysis.loc[reorder_mask, "حالة الطلب"] = "إعادة طلب"
-
-    def decision_reason(row):
-        if row["أولوية الطلب"] == "لا يحتاج":
-            if row[recent_column] <= 0:
-                return "لا يوجد طلب حديث؛ راجع التصريف بدلاً من الشراء"
-            return "الرصيد يغطي مدة التوريد والأمان والمراجعة"
-        cover_text = (
-            f"تغطية {row['تغطية المخزون بالأيام']:.0f} يوم"
-            if pd.notna(row["تغطية المخزون بالأيام"])
-            else "لا توجد تغطية"
-        )
-        purchase_text = (
-            f"آخر توريد منذ {int(row['أيام منذ آخر شراء/توريد'])} يوم"
-            if pd.notna(row["أيام منذ آخر شراء/توريد"])
-            else "لا يوجد شراء/توريد مطابق للمرجع المحدد"
-        )
-        return f"{cover_text}؛ الطلب {row['اتجاه الطلب']}؛ {purchase_text}"
-
-    analysis["سبب القرار"] = analysis.apply(decision_reason, axis=1)
-
-    clearance_mask = (
-        (analysis["الكمية"] > 0)
-        & (
-            analysis["آخر إخراج"].isna()
-            | (analysis["أيام منذ آخر خروج"] >= slow_days)
-            | (analysis["سرعة الحركة"] == "بطيئة")
-        )
-    )
-    analysis["اقتراح التصريف"] = ""
-    analysis.loc[clearance_mask, "اقتراح التصريف"] = "مرشح للتصريف"
-    analysis["فترة التحليل"] = f"آخر {demand_window_days} يوم"
-    priority_order = {"حرجة": 0, "عالية": 1, "مراقبة": 2, "لا يحتاج": 3}
-    analysis["ترتيب الأولوية"] = analysis["أولوية الطلب"].map(priority_order)
-    return analysis.sort_values(
-        ["ترتيب الأولوية", "كمية الطلب المقترحة"], ascending=[True, False]
-    ).drop(columns=["ترتيب الأولوية"]).reset_index(drop=True)
-
-
-def stock_item_key(row):
-    persisted_key = str(row.get("مفتاح المخزون", "") or "").strip()
-    if persisted_key:
-        return persisted_key
-    code = normalize_item_code(row.get("رمز المادة", ""))
-    return f"CODE:{code}" if code else f"NAME:{normalize_item_name(row.get('اسم المادة', ''))}"
-
-
-def ensure_unique_stock_keys(stock_df):
-    if "مفتاح المطابقة" not in stock_df.columns:
-        stock_df["مفتاح المطابقة"] = stock_df["اسم المادة"].map(normalize_item_name)
-    existing = stock_df.get("مفتاح المخزون")
-    if existing is not None and existing.notna().all() and existing.is_unique:
-        return stock_df
-    base_keys = stock_df.apply(
-        lambda row: (
-            f"CODE:{normalize_item_code(row.get('رمز المادة', ''))}"
-            if normalize_item_code(row.get("رمز المادة", ""))
-            else f"NAME:{normalize_item_name(row.get('اسم المادة', ''))}"
-        ),
-        axis=1,
-    )
-    duplicate_number = base_keys.groupby(base_keys).cumcount()
-    stock_df["مفتاح المخزون"] = [
-        base_key if number == 0 else f"{base_key}#{number + 1}"
-        for base_key, number in zip(base_keys, duplicate_number)
-    ]
-    return stock_df
-
-
-def save_stock_state(stock_df):
-    """Persist the complete current stock snapshot atomically."""
-    ensure_unique_stock_keys(stock_df)
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = []
-    for _, row in stock_df.iterrows():
-        rows.append((
-            stock_item_key(row),
-            normalize_item_code(row.get("رمز المادة", "")),
-            str(row.get("اسم المادة", "") or ""),
-            float(row.get("الكمية", 0) or 0),
-            str(row.get("مفتاح المطابقة", "") or normalize_item_name(row.get("اسم المادة", ""))),
-            now_text,
-        ))
-    with database_connection() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute("DELETE FROM stock_state")
-        connection.executemany(
-            """INSERT INTO stock_state
-               (item_key, item_code, item_name, quantity, match_key, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            rows,
-        )
-        connection.execute(
-            "INSERT OR REPLACE INTO app_metadata(meta_key, meta_value) VALUES (?, ?)",
-            ("stock_saved_at", now_text),
-        )
-
-
-def load_stock_state():
-    with database_connection() as connection:
-        rows = connection.execute(
-            "SELECT item_key, item_code, item_name, quantity, match_key FROM stock_state ORDER BY item_name"
-        ).fetchall()
-    if not rows:
-        return None
-    return pd.DataFrame([
-        {
-            "رمز المادة": row["item_code"],
-            "اسم المادة": row["item_name"],
-            "الكمية": row["quantity"],
-            "مفتاح المطابقة": row["match_key"],
-            "مفتاح المخزون": row["item_key"],
-        }
-        for row in rows
-    ])
-
-
-def save_imported_movement_history(movement_df):
-    rows = [(
-        str(row.get("رمز المادة", "") or ""),
-        str(row.get("اسم المادة", "") or ""),
-        pd.Timestamp(row["التاريخ"]).strftime("%Y-%m-%d %H:%M:%S"),
-        str(row.get("المرجع", "") or ""),
-        str(row.get("الزبون", "") or ""),
-        float(row.get("إدخال", 0) or 0),
-        float(row.get("إخراج", 0) or 0),
-        None if pd.isna(row.get("الرصيد")) else float(row.get("الرصيد")),
-        str(row.get("المستخدم", "") or ""),
-        str(row.get("بيان", "") or ""),
-        str(row.get("مفتاح المطابقة", "") or ""),
-    ) for _, row in movement_df.iterrows()]
-    with database_connection() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute("DELETE FROM imported_movement_history")
-        connection.executemany(
-            """INSERT INTO imported_movement_history
-               (item_code, item_name, movement_date, reference, customer,
-                qty_in, qty_out, balance, username, statement, match_key)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            rows,
-        )
-
-
-def load_imported_movement_history():
-    with database_connection() as connection:
-        rows = connection.execute(
-            "SELECT * FROM imported_movement_history ORDER BY movement_date"
-        ).fetchall()
-    if not rows:
-        return None
-    return pd.DataFrame([{
-        "رمز المادة": row["item_code"],
-        "اسم المادة": row["item_name"],
-        "التاريخ": pd.to_datetime(row["movement_date"]),
-        "المرجع": row["reference"],
-        "الزبون": row["customer"],
-        "إدخال": row["qty_in"],
-        "إخراج": row["qty_out"],
-        "الرصيد": row["balance"],
-        "المستخدم": row["username"],
-        "بيان": row["statement"],
-        "مفتاح المطابقة": row["match_key"],
-    } for row in rows])
-
-
-def verify_operation_password(password):
-    expected = st.session_state['user_db'][current_user]["password"]
-    return bool(password) and password == expected
-
-
-def load_manual_movements():
-    with database_connection() as connection:
-        rows = connection.execute(
-            """SELECT * FROM movement_ledger
-               WHERE source = 'MANUAL' ORDER BY created_at DESC"""
-        ).fetchall()
-    return [{
-        "التاريخ": row["created_at"],
-        "المستخدم": row["username"],
-        "نوع الحركة": row["movement_type"],
-        "رمز المادة": row["item_code"],
-        "اسم المادة": row["item_name"],
-        "الكمية": row["quantity"],
-        "الكمية قبل الحركة": row["quantity_before"],
-        "الكمية بعد الحركة": row["quantity_after"],
-        "رقم الفاتورة / المرجع": row["invoice_reference"],
-        "بدون فاتورة": "نعم" if row["without_invoice"] else "لا",
-        "وصل تسليم": "نعم" if row["delivery_note"] else "لا",
-        "السبب": row["reason"],
-    } for row in rows]
-
-
-def movement_exists(operation_fingerprint):
-    with database_connection() as connection:
-        row = connection.execute(
-            "SELECT 1 FROM movement_ledger WHERE operation_fingerprint = ? LIMIT 1",
-            (operation_fingerprint,),
-        ).fetchone()
-    return row is not None
-
-
-def post_stock_operation(stock_df, changes, operation_meta, invoice_payload=None):
-    """Commit ledger rows and stock balances together; duplicate requests are rejected."""
-    operation_id = operation_meta.get("operation_id") or str(uuid.uuid4())
-    fingerprint = operation_meta["fingerprint"]
-    if movement_exists(fingerprint):
-        raise ValueError("تم تنفيذ هذه العملية سابقاً؛ تم منع التكرار.")
-
-    working_stock = stock_df.copy()
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ledger_rows = []
-    for line_number, change in enumerate(changes, start=1):
-        row_index = int(change["row_index"])
-        movement_type = change["movement_type"]
-        quantity = float(change["quantity"])
-        before_qty = float(working_stock.at[row_index, "الكمية"])
-        after_qty = before_qty + quantity if movement_type == "IN" else before_qty - quantity
-        if quantity <= 0:
-            raise ValueError("يجب أن تكون جميع الكميات أكبر من صفر.")
-        if movement_type == "OUT" and after_qty < 0:
-            raise ValueError(
-                f"رصيد {working_stock.at[row_index, 'اسم المادة']} غير كافٍ."
-            )
-        working_stock.at[row_index, "الكمية"] = after_qty
-        item_row = working_stock.loc[row_index]
-        item_key = stock_item_key(item_row)
-        ledger_rows.append((
-            str(uuid.uuid4()), operation_id, fingerprint,
-            created_at, created_at[:10], operation_meta["username"],
-            operation_meta["source"], movement_type, item_key,
-            normalize_item_code(item_row.get("رمز المادة", "")),
-            str(item_row.get("اسم المادة", "")), quantity,
-            before_qty, after_qty,
-            str(operation_meta.get("invoice_reference", "") or ""),
-            int(bool(operation_meta.get("without_invoice"))),
-            int(bool(operation_meta.get("delivery_note"))),
-            str(operation_meta.get("reason", "") or ""),
-        ))
-
-    with database_connection() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        if connection.execute(
-            "SELECT 1 FROM movement_ledger WHERE operation_fingerprint = ? LIMIT 1",
-            (fingerprint,),
-        ).fetchone():
-            raise ValueError("تم تنفيذ هذه العملية سابقاً؛ تم منع التكرار.")
-        connection.executemany(
-            """INSERT INTO movement_ledger
-               (movement_id, operation_id, operation_fingerprint, created_at,
-                business_date, username, source, movement_type, item_key,
-                item_code, item_name, quantity, quantity_before, quantity_after,
-                invoice_reference, without_invoice, delivery_note, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            ledger_rows,
-        )
-        for change in changes:
-            saved_row = working_stock.loc[int(change["row_index"])]
-            connection.execute(
-                """INSERT INTO stock_state
-                   (item_key, item_code, item_name, quantity, match_key, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(item_key) DO UPDATE SET
-                     item_code = excluded.item_code,
-                     item_name = excluded.item_name,
-                     quantity = excluded.quantity,
-                     match_key = excluded.match_key,
-                     updated_at = excluded.updated_at""",
-                (
-                    stock_item_key(saved_row),
-                    normalize_item_code(saved_row.get("رمز المادة", "")),
-                    str(saved_row.get("اسم المادة", "")),
-                    float(saved_row.get("الكمية", 0)),
-                    str(saved_row.get("مفتاح المطابقة", "")),
-                    created_at,
-                ),
-            )
-        if invoice_payload is not None:
-            connection.execute(
-                """INSERT INTO posted_invoices
-                   (invoice_reference, image_hash, operation_id, posted_at,
-                    username, recognized_json) VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    operation_meta["invoice_reference"],
-                    invoice_payload["image_hash"], operation_id, created_at,
-                    operation_meta["username"],
-                    json.dumps(invoice_payload, ensure_ascii=False),
-                ),
-            )
-    return working_stock, ledger_rows
-
-
-def invoice_already_posted(invoice_reference, image_hash):
-    with database_connection() as connection:
-        row = connection.execute(
-            """SELECT invoice_reference FROM posted_invoices
-               WHERE invoice_reference = ? OR image_hash = ? LIMIT 1""",
-            (invoice_reference, image_hash),
-        ).fetchone()
-    return row["invoice_reference"] if row else None
-
-
-def ledger_for_date(report_date):
-    date_text = report_date.strftime("%Y-%m-%d")
-    with database_connection() as connection:
-        rows = connection.execute(
-            """SELECT * FROM movement_ledger
-               WHERE business_date = ? ORDER BY created_at, movement_id""",
-            (date_text,),
-        ).fetchall()
-    return pd.DataFrame([dict(row) for row in rows])
-
-
-def ledger_as_movement_history():
-    with database_connection() as connection:
-        rows = connection.execute(
-            "SELECT * FROM movement_ledger ORDER BY created_at"
-        ).fetchall()
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame([{
-        "رمز المادة": row["item_code"],
-        "اسم المادة": row["item_name"],
-        "التاريخ": pd.to_datetime(row["created_at"]),
-        "المرجع": row["invoice_reference"],
-        "الزبون": "",
-        "إدخال": row["quantity"] if row["movement_type"] == "IN" else 0,
-        "إخراج": row["quantity"] if row["movement_type"] == "OUT" else 0,
-        "الرصيد": row["quantity_after"],
-        "المستخدم": row["username"],
-        "بيان": row["reason"],
-        "مفتاح المطابقة": normalize_item_name(row["item_name"]),
-    } for row in rows])
-
-
-def close_business_day(report_date, username, stock_df):
-    ledger = ledger_for_date(report_date)
-    total_in = float(ledger.loc[ledger["movement_type"] == "IN", "quantity"].sum()) if not ledger.empty else 0
-    total_out = float(ledger.loc[ledger["movement_type"] == "OUT", "quantity"].sum()) if not ledger.empty else 0
-    no_invoice_count = int(ledger["without_invoice"].sum()) if not ledger.empty else 0
-    with database_connection() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            """INSERT OR REPLACE INTO daily_closures
-               (business_date, closed_at, username, movement_count,
-                total_in, total_out, no_invoice_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                report_date.strftime("%Y-%m-%d"),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                username, len(ledger), total_in, total_out, no_invoice_count,
-            ),
-        )
-        date_text = report_date.strftime("%Y-%m-%d")
-        connection.execute(
-            "DELETE FROM daily_stock_snapshots WHERE business_date = ?",
-            (date_text,),
-        )
-        connection.executemany(
-            """INSERT INTO daily_stock_snapshots
-               (business_date, item_key, item_code, item_name, quantity, match_key)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [(
-                date_text,
-                stock_item_key(row),
-                normalize_item_code(row.get("رمز المادة", "")),
-                str(row.get("اسم المادة", "")),
-                float(row.get("الكمية", 0)),
-                str(row.get("مفتاح المطابقة", "")),
-            ) for _, row in stock_df.iterrows()],
-        )
-    return ledger
-
-
-def load_daily_stock_snapshot(report_date):
-    with database_connection() as connection:
-        rows = connection.execute(
-            """SELECT * FROM daily_stock_snapshots
-               WHERE business_date = ? ORDER BY item_name""",
-            (report_date.strftime("%Y-%m-%d"),),
-        ).fetchall()
-    if not rows:
-        return None
-    return pd.DataFrame([{
-        "رمز المادة": row["item_code"],
-        "اسم المادة": row["item_name"],
-        "الكمية": row["quantity"],
-        "مفتاح المطابقة": row["match_key"],
-        "مفتاح المخزون": row["item_key"],
-    } for row in rows])
-
-
-def daily_closure_for_date(report_date):
-    with database_connection() as connection:
-        row = connection.execute(
-            "SELECT * FROM daily_closures WHERE business_date = ?",
-            (report_date.strftime("%Y-%m-%d"),),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def build_end_of_day_report(report_date, stock_df, analysis_df):
-    ledger = ledger_for_date(report_date)
-    total_in = float(ledger.loc[ledger["movement_type"] == "IN", "quantity"].sum()) if not ledger.empty else 0
-    total_out = float(ledger.loc[ledger["movement_type"] == "OUT", "quantity"].sum()) if not ledger.empty else 0
-    no_invoice_count = int(ledger["without_invoice"].sum()) if not ledger.empty else 0
-    affected = pd.DataFrame()
-    if not ledger.empty:
-        affected = ledger.groupby(
-            ["item_key", "item_code", "item_name"], as_index=False
-        ).agg(
-            **{
-                "الرصيد الافتتاحي": ("quantity_before", "first"),
-                "إجمالي الإدخال": (
-                    "quantity",
-                    lambda values: float(values[ledger.loc[values.index, "movement_type"] == "IN"].sum()),
-                ),
-                "إجمالي الإخراج": (
-                    "quantity",
-                    lambda values: float(values[ledger.loc[values.index, "movement_type"] == "OUT"].sum()),
-                ),
-                "الرصيد الختامي": ("quantity_after", "last"),
-            }
-        ).rename(columns={
-            "item_code": "رمز المادة",
-            "item_name": "اسم المادة",
-        })
-
-    summary = pd.DataFrame([
-        {"البيان": "تاريخ التقرير", "القيمة": report_date.strftime("%Y-%m-%d")},
-        {"البيان": "عدد الحركات", "القيمة": len(ledger)},
-        {"البيان": "إجمالي الإدخال", "القيمة": total_in},
-        {"البيان": "إجمالي الإخراج", "القيمة": total_out},
-        {"البيان": "حركات بدون فاتورة", "القيمة": no_invoice_count},
-        {"البيان": "وقت إنشاء التقرير", "القيمة": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-    ])
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        summary.to_excel(writer, index=False, sheet_name="Daily_Summary")
-        ledger.to_excel(writer, index=False, sheet_name="Daily_Movements")
-        affected.drop(columns=["item_key"], errors="ignore").to_excel(
-            writer, index=False, sheet_name="Affected_Items"
-        )
-        stock_df.drop(
-            columns=["مفتاح المطابقة", "مفتاح المخزون"], errors="ignore"
-        ).to_excel(
-            writer, index=False, sheet_name="Closing_Stock"
-        )
-        if not ledger.empty:
-            ledger[ledger["without_invoice"] == 1].to_excel(
-                writer, index=False, sheet_name="No_Invoice_Alerts"
-            )
-        if analysis_df is not None and not analysis_df.empty:
-            clean_analysis = analysis_df.drop(
-                columns=["مفتاح المطابقة", "رمز الحركة", "اسم الحركة"],
-                errors="ignore",
-            )
-            clean_analysis[clean_analysis["حالة الطلب"] == "إعادة طلب"].to_excel(
-                writer, index=False, sheet_name="Reorder_List"
-            )
-            clean_analysis[
-                clean_analysis["اقتراح التصريف"] == "مرشح للتصريف"
-            ].to_excel(writer, index=False, sheet_name="Slow_Clearance")
-    return output.getvalue(), ledger, affected
-
-
-# Restore the last committed state automatically after app/server reruns.
-if st.session_state['live_stock'] is None:
-    st.session_state['live_stock'] = load_stock_state()
-if st.session_state['movement_history'] is None:
-    st.session_state['movement_history'] = load_imported_movement_history()
-st.session_state['manual_movements'] = load_manual_movements()
-
-if st.session_state['live_stock'] is not None:
-    today_ledger = ledger_for_date(datetime.now().date())
-    total_items = len(st.session_state['live_stock'])
-    positive_items = int((st.session_state['live_stock']['الكمية'] > 0).sum())
-    today_operations = len(today_ledger)
-    today_no_invoice = int(today_ledger['without_invoice'].sum()) if not today_ledger.empty else 0
-    dash1, dash2, dash3, dash4 = st.columns(4)
-    dash1.metric("إجمالي المواد", f"{total_items:,}")
-    dash2.metric("مواد برصيد موجب", f"{positive_items:,}")
-    dash3.metric("حركات اليوم", f"{today_operations:,}")
-    dash4.metric("تنبيهات بلا فاتورة", f"{today_no_invoice:,}")
-
-setup_tab, invoice_tab, manual_tab, analysis_tab, reports_tab = st.tabs([
-    "⚙️ الإعداد والبيانات",
-    "🧾 قراءة الفواتير",
-    "↔️ حركة يدوية",
-    "📊 التحليل والطلب",
-    "🌙 تقارير نهاية اليوم",
-])
-setup_tab.__enter__()
-
-# ==========================================
-# HELPER: SEARCHABLE TABLE
-# ==========================================
-def display_searchable_table(df, key_prefix):
-    search_query = st.text_input("🔍 بحث في المخزون (بررمز المادة أو اسم المادة):", key=f"search_{key_prefix}")
-    
-    if search_query:
-        mask = df['رمز المادة'].astype(str).str.contains(search_query, case=False, na=False) | \
-               df['اسم المادة'].astype(str).str.contains(search_query, case=False, na=False)
-        display_df = df[mask].drop(
-            columns=['مفتاح المطابقة', 'مفتاح المخزون'], errors='ignore'
-        )
-        st.markdown(display_df.to_html(index=False), unsafe_allow_html=True)
-    else:
-        st.info("أدخل مصطلح بحث أعلاه لعرض المواد (تم إخفاء القائمة الكاملة لتوفير المساحة وتناسب الشاشات).")
-
-# ==========================================
-# 1. CONTROLS SECTION
-# ==========================================
-st.subheader("لوحة التحكم")
-
-# Session State Backup & Restore
-with st.expander("💾 حفظ أو استعادة حالة العمل (لتجنب فقدان البيانات عند الخروج)"):
-    col_save, col_load = st.columns(2)
-    with col_save:
-        if st.session_state['live_stock'] is not None:
-            state_data = {
-                "live_stock": st.session_state['live_stock'].to_json(orient='split'),
-                "processed_invoices": {k: v.to_json(orient='split') for k, v in st.session_state['processed_invoices'].items()},
-                "invoice_raw_data": st.session_state['invoice_raw_data'],
-                "file_to_invoice": st.session_state['file_to_invoice'],
-                "movement_history": (
-                    st.session_state['movement_history'].to_json(
-                        orient='split', date_format='iso'
-                    ) if st.session_state['movement_history'] is not None else None
-                ),
-                "manual_movements": st.session_state['manual_movements']
-            }
-            json_bytes = json.dumps(state_data, ensure_ascii=False).encode('utf-8')
-            st.download_button(
-                label="📥 تنزيل ملف حفظ الحالة الحالية",
-                data=json_bytes,
-                file_name="golden_palace_session_backup.json",
-                mime="application/json",
-                use_container_width=True
-            )
-        else:
-            st.info("لا يوجد مخزون مفعل لحفظه حالياً.")
-            
-    with col_load:
-        uploaded_backup = st.file_uploader("📤 استعادة ملف حفظ سابق (.json)", type=["json"])
-        if uploaded_backup is not None:
-            try:
-                loaded_state = json.load(uploaded_backup)
-                st.session_state['live_stock'] = pd.read_json(loaded_state['live_stock'], orient='split')
-                st.session_state['processed_invoices'] = {k: pd.read_json(v, orient='split') for k, v in loaded_state['processed_invoices'].items()}
-                st.session_state['invoice_raw_data'] = loaded_state['invoice_raw_data']
-                st.session_state['file_to_invoice'] = loaded_state['file_to_invoice']
-                movement_json = loaded_state.get('movement_history')
-                st.session_state['movement_history'] = (
-                    pd.read_json(io.StringIO(movement_json), orient='split')
-                    if movement_json else None
-                )
-                if st.session_state['movement_history'] is not None:
-                    st.session_state['movement_history']['التاريخ'] = pd.to_datetime(
-                        st.session_state['movement_history']['التاريخ'], errors='coerce'
-                    )
-                save_stock_state(st.session_state['live_stock'])
-                if st.session_state['movement_history'] is not None:
-                    save_imported_movement_history(
-                        st.session_state['movement_history']
-                    )
-                st.session_state['manual_movements'] = load_manual_movements()
-                st.success("✅ تمت استعادة الحالة وحفظها تلقائياً!")
+def get_store(settings_json):
+    return Store.from_settings(json.loads(settings_json))
+
+
+@st.cache_data(show_spinner=False,ttl=120,max_entries=2)
+def get_analysis(revision,settings_json,database_id,_store,_token):
+    settings=json.loads(settings_json)
+    stock=_store.stock(_token)
+    history=_store.movement_history(_token)
+    if stock.empty or history.empty:return pd.DataFrame()
+    return build_inventory_analysis(stock,history,settings["lead_days"],settings["safety_days"],settings["slow_days"],
+                                    settings["demand_window_days"],settings["review_days"],settings["purchase_prefixes"])
+
+
+def analysis_now(store,token,state):
+    return get_analysis(state["revision"],json.dumps(state["settings"],sort_keys=True),
+                        str(store.engine.url.render_as_string(hide_password=True)),store,token)
+
+
+def section(title,note=""):
+    st.markdown(section_html(title,note),unsafe_allow_html=True)
+
+
+def nonce(name):
+    key="operation_"+name
+    if key not in st.session_state:st.session_state[key]=str(uuid.uuid4())
+    return st.session_state[key]
+
+
+def success(name=None,message="Saved"):
+    if name:st.session_state.pop("operation_"+name,None)
+    st.session_state["flash"]=t(message)
+    st.session_state["wipe_passwords"]=True
+    st.rerun()
+
+
+def table(frame,**kwargs):
+    if frame is None or frame.empty:
+        st.info(t("Empty"));return
+    st.dataframe(frame,hide_index=True,width="stretch",**kwargs)
+
+
+def export_button(name,sheets):
+    # Do not keep large XLSX objects in the session across OCR scans.
+    if st.button(t("Prepare export"),key="prepare_"+name):
+        data=excel_bytes(sheets)
+        st.download_button(t("Download"),data,file_name=name+".xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="download_"+name)
+
+
+def stock_page(store,token,state,stock):
+    section("Stock")
+    if stock.empty:
+        st.info(t("No stock"));return
+    with st.container(border=True):
+        a,b=st.columns([3,1])
+        search=a.text_input(t("Search"),key="stock_search")
+        category=b.selectbox(t("Stock"),["All","Available","Out of stock"],format_func=t,label_visibility="collapsed")
+        shown=stock
+        if search:
+            mask=stock[COL_CODE].astype(str).str.contains(search,case=False,regex=False,na=False)|stock[COL_NAME].astype(str).str.contains(search,case=False,regex=False,na=False)
+            shown=shown[mask]
+        if category=="Available":shown=shown[shown[COL_QTY]>0]
+        if category=="Out of stock":shown=shown[shown[COL_QTY]<=0]
+        table(visible_frame(shown),height=470)
+        st.caption(f"{len(shown):,} / {len(stock):,}")
+        export_button("GoldenPalace_Stock",{"Stock":visible_frame(shown)})
+
+
+def invoices_page(store,token,state,stock):
+    section("Invoices","OCR hint")
+    ok,_,detail=free_ocr_status()
+    with st.container(border=True):
+        left,right=st.columns([1.6,1])
+        with left:
+            uploaded=st.file_uploader(t("Invoice image"),type=["png","jpg","jpeg"],key="invoice_upload")
+            if st.checkbox(t("Camera"),key="camera_enabled"):
+                capture=st.camera_input(t("Invoice image"),key="camera_capture")
+                if capture:uploaded=capture
+            a,b=st.columns(2)
+            read=a.button(t("Read invoice"),type="primary",disabled=not (uploaded and ok),width="stretch")
+            manual=b.button(t("Manual invoice"),width="stretch")
+            if not ok:st.info("OCR is unavailable on this host. Manual invoice entry remains available.")
+            if manual:
+                st.session_state["selected_draft_id"]=store.create_draft(token,source_name=t("Manual invoice"))
                 st.rerun()
-            except Exception as e:
-                st.error("ملف التخزين غير صالح.")
-
-col1, col3 = st.columns(2)
-
-with col1:
-    if is_admin:
-        uploaded_stock_report = st.file_uploader("📊 1. رفع تقرير المخزون الأساسي (بداية اليوم)", type=["xlsx", "xls"])
-        if uploaded_stock_report is not None:
+            if read:
+                content=uploaded.getvalue()
+                image_hash=hashlib.sha256(content).hexdigest()
+                # Persist the draft identity before starting a potentially failing model.
+                draft_id=store.create_draft(token,source_name=uploaded.name,image_hash=image_hash)
+                st.session_state["selected_draft_id"]=draft_id
+                pending={d["draft_id"]:d for d in store.drafts(token)}
+                if draft_id not in pending:
+                    st.warning(t("This invoice or image was already posted"))
+                elif pending[draft_id]["payload"].get("items"):
+                    st.info("This image already has a saved draft. Review it below; OCR was not repeated.")
+                else:
+                    with st.spinner(t("Reading")):
+                        try:
+                            result=extract_invoice_data(uploaded,stock)
+                            result["movement_type"]=""  # the numeric reader cannot determine direction
+                            store.save_draft(token,draft_id,result,pending[draft_id]["version"])
+                            success(message="Saved")
+                        except Exception as error:
+                            # Worker messages are bounded; the worker has no database credentials in its logs.
+                            if isinstance(error,(RuntimeError,ValueError)):
+                                st.error(str(error)[:1000])
+                            else:show_error(error)
+        with right:
+            if uploaded:
+                st.image(uploaded.getvalue(),width="stretch")
+            else:
+                st.markdown(section_html("Review","Draft hint"),unsafe_allow_html=True)
+    section("Drafts")
+    drafts=store.drafts(token)
+    if not drafts:
+        st.info(t("No drafts"));return
+    choices={d["draft_id"]:d for d in drafts}
+    selected=st.session_state.get("selected_draft_id")
+    if selected not in choices:selected=drafts[0]["draft_id"]
+    selected=st.selectbox(t("Drafts"),list(choices),index=list(choices).index(selected),
+        format_func=lambda k: (choices[k]["payload"].get("invoice_number") or choices[k]["source_name"] or k[:8])+" / "+choices[k]["username"],
+        key="draft_selector")
+    st.session_state["selected_draft_id"]=selected
+    draft=choices[selected];payload=draft["payload"]
+    # Versioned widget identity prevents stale edits from overwriting a newer revision.
+    suffix=selected+"_"+str(draft["version"])
+    for message in payload.get("warnings",[])[:6]:st.warning(str(message))
+    st.caption(t("Draft hint"))
+    rows=payload.get("items") or [{"item_code":"","item_name":"","quantity":None}]
+    frame=pd.DataFrame(rows)[["item_code","item_name","quantity"]]
+    frame["item_code"]=frame["item_code"].fillna("").astype(str)
+    frame["item_name"]=frame["item_name"].fillna("").astype(str)
+    frame["quantity"]=pd.to_numeric(frame["quantity"],errors="coerce")
+    with st.form("review_"+suffix):
+        a,b=st.columns([1.3,1])
+        reference=a.text_input(t("Reference"),value=str(payload.get("invoice_number", "")),key="reference_"+suffix)
+        kinds=["","OUT","IN"]
+        kind=b.selectbox(t("Movement type"),kinds,index=kinds.index(payload.get("movement_type","")) if payload.get("movement_type","") in kinds else 0,
+                         format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
+        edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,
+            column_config={"item_code":st.column_config.TextColumn(COL_CODE),"item_name":st.column_config.TextColumn(COL_NAME),
+                           "quantity":st.column_config.NumberColumn(COL_QTY,min_value=0,format="%.4f")})
+        review_checked=st.checkbox(t("Confirm review"),key="checked_"+suffix)
+        password=st.text_input(t("Approval password"),type="password",key="password_invoice_"+suffix)
+        a,b=st.columns(2)
+        save=a.form_submit_button(t("Save draft"),width="stretch")
+        post=b.form_submit_button(t("Post invoice"),type="primary",width="stretch")
+        if save or post:
             try:
-                df = read_stock_report(uploaded_stock_report.getvalue())
-                if st.session_state['movement_history'] is not None:
-                    df = enrich_stock_codes(df, st.session_state['movement_history'])
-                if st.session_state['live_stock'] is None:
-                    st.session_state['live_stock'] = df
-                    save_stock_state(df)
-                    st.success("✅ تم تحميل المخزون الأساسي وحفظه تلقائياً.")
-                    st.rerun()
+                updated=dict(payload)
+                updated.update(invoice_number=reference.strip(),movement_type=kind,
+                               items=clean_json(edited.to_dict("records")))
+                if save:
+                    store.save_draft(token,selected,updated,draft["version"])
+                    success()
                 else:
-                    st.warning(
-                        "يوجد رصيد محفوظ. اعتماد الملف سيستبدل الرصيد الحالي كنقطة بداية جديدة."
-                    )
-                    replace_stock_password = st.text_input(
-                        "كلمة المرور لاعتماد رصيد بداية جديد",
-                        type="password",
-                        key="replace_stock_password",
-                    )
-                    if st.button(
-                        "اعتماد ملف الجرد كبداية جديدة",
-                        use_container_width=True,
-                        key="replace_stock_button",
-                    ):
-                        if not verify_operation_password(replace_stock_password):
-                            st.error("كلمة المرور غير صحيحة؛ لم يتم استبدال الرصيد.")
-                        else:
-                            st.session_state['live_stock'] = df
-                            save_stock_state(df)
-                            st.success("تم حفظ رصيد البداية الجديد.")
-                            st.rerun()
-            except Exception as e:
-                st.error(f"خطأ في قراءة ملف المخزون: {e}")
-    else:
-        st.info("🔒 📊 رفع تقرير المخزون الأساسي مقتصر على مدير النظام (Admin).")
+                    if not review_checked:raise AppError("Confirm review")
+                    changes=match_invoice_lines(updated["items"],store.stock(token),kind)
+                    store.post(token,password,changes,nonce("invoice_"+selected),source="INVOICE",reference=reference,
+                        image_hash=draft["image_hash"],reason=t("Invoices"),delivery_note=True,reviewed=updated,draft_id=selected,expected_draft_version=draft["version"])
+                    success("invoice_"+selected)
+            except Exception as error:show_error(error)
+    with st.expander(t("Discard")):
+        discard_ok=st.checkbox(t("Discard"),key="discard_check_"+suffix)
+        if st.button(t("Discard"),disabled=not discard_ok,key="discard_"+suffix):
+            store.discard_draft(token,selected);success()
 
-with col3:
-    uploaded_movement_report = st.file_uploader(
-        "📈 2. رفع تقرير حركة المادة للتحليل",
-        type=["xlsx", "xls"],
-        help="يستخدم للتحليل والتصنيف فقط؛ لا تُخصم حركاته القديمة من رصيد الجرد الحالي.",
-    )
-    if uploaded_movement_report is not None:
-        try:
-            movement_bytes = uploaded_movement_report.getvalue()
-            movement_hash = hashlib.sha256(movement_bytes).hexdigest()
-            if st.session_state['movement_file_hash'] != movement_hash:
-                movement_df = read_movement_report(movement_bytes)
-                st.session_state['movement_history'] = movement_df
-                if st.session_state['live_stock'] is not None:
-                    st.session_state['live_stock'] = enrich_stock_codes(
-                        st.session_state['live_stock'], movement_df
-                    )
-                    save_stock_state(st.session_state['live_stock'])
-                save_imported_movement_history(movement_df)
-                st.session_state['movement_file_hash'] = movement_hash
-                st.success(
-                    f"✅ تم تحميل وحفظ {len(movement_df):,} حركة مخزون للتحليل."
-                )
-            else:
-                st.caption("تقرير الحركة محفوظ ومحدّث.")
-        except Exception as movement_error:
-            st.error(f"تعذر قراءة تقرير الحركة: {movement_error}")
 
-setup_tab.__exit__(None, None, None)
-invoice_tab.__enter__()
-st.subheader("🧾 قراءة الفاتورة ومراجعتها")
-st.caption(
-    "قراءة مجانية بـ EasyOCR بدون OpenAI API وبدون packages.txt. "
-    "ارفع الصورة، راجع النتيجة، ثم أدخل كلمة المرور لاعتماد الحركة."
-)
-ocr_ok, ocr_language, ocr_info = free_ocr_status()
-if ocr_ok:
-    st.success(f"✅ OCR مجاني جاهز: {ocr_info}")
-else:
-    st.error(f"❌ OCR المجاني غير جاهز: {ocr_info}")
-uploaded_invoices = st.file_uploader(
-    "رفع صور الفواتير",
-    type=["png", "jpg", "jpeg"],
-    accept_multiple_files=True,
-)
+def movements_page(store,token,state,stock):
+    section("Movements")
+    if stock.empty:
+        st.info(t("No stock"));return
+    request=nonce("manual")
+    # Direction is outside the form so delivery-note controls update immediately.
+    kind=st.segmented_control(t("Movement type"),["IN","OUT"],default="OUT",format_func=t,key="manual_kind") or "OUT"
+    with st.form("manual_"+request):
+        a,b=st.columns([3,1])
+        indexed=stock.set_index(COL_KEY)
+        item=a.selectbox(t("Item"),indexed.index.tolist(),format_func=lambda k:f"{indexed.at[k,COL_CODE]} | {indexed.at[k,COL_NAME]}")
+        qty=b.number_input(t("Quantity"),min_value=0.0,step=1.0,format="%.4f")
+        a,b=st.columns(2)
+        reference=a.text_input(t("Reference optional"))
+        reason=b.text_input(t("Reason"))
+        delivered=st.checkbox(t("Delivery confirmed")) if kind=="OUT" else False
+        password=st.text_input(t("Approval password"),type="password",key="password_manual_"+request)
+        if st.form_submit_button(t("Post movement"),type="primary",width="stretch"):
+            try:
+                store.post(token,password,[dict(item_key=item,movement_type=kind,quantity=qty)],request,
+                           reference=reference,reason=reason,delivery_note=delivered)
+                success("manual")
+            except Exception as error:show_error(error)
+    section("Movement log")
+    day=st.date_input(t("Date"),value=store.today(),key="manual_log_day")
+    ledger=store.ledger(token,day)
+    if not ledger.empty:
+        table(ledger[["created_at","username","source","movement_type","item_code","item_name","quantity","quantity_before","quantity_after","invoice_reference","without_invoice"]])
+        export_button("GoldenPalace_Movements",{"Movements":ledger})
+    else:st.info(t("Empty"))
 
-# STRICT OPTIONAL CAMERA: Fully off until checked
-camera_image = None
-enable_camera = st.checkbox("📸 تفعيل الكاميرا لالتقاط صورة الفاتورة مباشرة")
-if enable_camera:
-    camera_image = st.camera_input("وجه الكاميرا نحو الفاتورة ثم اضغط التقاط")
 
-# Combine uploaded files and optional camera capture
-active_invoices_list = []
-if uploaded_invoices:
-    active_invoices_list.extend(uploaded_invoices)
-if camera_image:
-    active_invoices_list.append(camera_image)
+def analysis_page(store,token,state,stock):
+    section("Analysis")
+    data=analysis_now(store,token,state)
+    if data.empty:
+        st.info(t("Empty")+". "+t("Upload history"));return
+    priority="\u0623\u0648\u0644\u0648\u064a\u0629 \u0627\u0644\u0637\u0644\u0628"
+    reorder="\u062d\u0627\u0644\u0629 \u0627\u0644\u0637\u0644\u0628"
+    speed="\u0633\u0631\u0639\u0629 \u0627\u0644\u062d\u0631\u0643\u0629"
+    clearance="\u0627\u0642\u062a\u0631\u0627\u062d \u0627\u0644\u062a\u0635\u0631\u064a\u0641"
+    critical=data[data[priority]=="\u062d\u0631\u062c\u0629"]
+    reorders=data[data[reorder]=="\u0625\u0639\u0627\u062f\u0629 \u0637\u0644\u0628"]
+    fast=data[data[speed]=="\u0633\u0631\u064a\u0639\u0629"]
+    slow=data[data[clearance]=="\u0645\u0631\u0634\u062d \u0644\u0644\u062a\u0635\u0631\u064a\u0641"]
+    st.markdown(kpis_html([("Critical",len(critical),"Items"),("Reorder",len(reorders),"Items"),("Fast",len(fast),"Items"),("Clearance",len(slow),"Items")]),unsafe_allow_html=True)
+    selected=st.segmented_control(t("Analysis"),["Reorder","Fast","Clearance","All"],default="Reorder",format_func=t,key="analysis_filter") or "Reorder"
+    selected_data={"Reorder":reorders,"Fast":fast,"Clearance":slow,"All":data}[selected]
+    columns=[COL_CODE,COL_NAME,COL_QTY,priority,"\u062a\u063a\u0637\u064a\u0629 \u0627\u0644\u0645\u062e\u0632\u0648\u0646 \u0628\u0627\u0644\u0623\u064a\u0627\u0645",
+             "\u0643\u0645\u064a\u0629 \u0627\u0644\u0637\u0644\u0628 \u0627\u0644\u0645\u0642\u062a\u0631\u062d\u0629","\u0627\u062a\u062c\u0627\u0647 \u0627\u0644\u0637\u0644\u0628","\u0633\u0628\u0628 \u0627\u0644\u0642\u0631\u0627\u0631"]
+    table(selected_data[columns],height=460)
+    with st.expander(t("Analysis")):
+        table(visible_frame(selected_data))
+    st.caption("Analysis retains the report-based demand windows. Recommendations require review; they do not place orders.")
+    export_button("GoldenPalace_Analysis",{"Analysis":visible_frame(data),"Reorder":visible_frame(reorders),"Clearance":visible_frame(slow)})
 
-# ==========================================
-# REAL INVOICE REVIEW & PASSWORD-AUTHORIZED POSTING
-# ==========================================
-invoice_flash = st.session_state.pop("invoice_flash", None)
-if invoice_flash:
-    st.success(invoice_flash)
 
-if active_invoices_list:
-    if st.button(
-        "🔎 قراءة صور الفواتير مجاناً",
-        type="primary",
-        use_container_width=True,
-        disabled=not ocr_ok,
-    ):
-        for invoice_file in active_invoices_list:
-            image_hash = hashlib.sha256(invoice_file.getvalue()).hexdigest()
-            if image_hash in st.session_state['recognized_invoices']:
-                continue
-            with st.spinner(f"جاري قراءة {invoice_file.name} محلياً..."):
+def closing_page(store,token,state,stock,actor):
+    section("Closing")
+    day=st.date_input(t("Date"),value=store.today(),max_value=store.today(),key="closing_day")
+    closure=store.closure(token,day)
+    ledger=store.ledger(token,day)
+    if closure:st.success(t("Closed")+" / "+closure["username"]+" / "+aware(closure["closed_at"]).astimezone(store.tz).strftime("%Y-%m-%d %H:%M"))
+    else:st.info(t("Open"))
+    sum_in=float(ledger.loc[ledger["movement_type"]=="IN","quantity"].sum()) if not ledger.empty else 0
+    sum_out=float(ledger.loc[ledger["movement_type"]=="OUT","quantity"].sum()) if not ledger.empty else 0
+    alerts=int(ledger["without_invoice"].sum()) if not ledger.empty else 0
+    st.markdown(kpis_html([("Movements",len(ledger),"Today"),("IN",f"{sum_in:g}","Quantity"),("OUT",f"{sum_out:g}","Quantity"),("Without invoice",alerts,"Today")]),unsafe_allow_html=True)
+    table(ledger)
+    day_stock=store.day_stock(token,day) if closure else (stock if day==store.today() else pd.DataFrame())
+    if not closure and day!=store.today():st.warning(t("Past stock unavailable"))
+    analysis=pd.DataFrame(closure["analysis"]) if closure else (analysis_now(store,token,state) if day==store.today() else pd.DataFrame())
+    report=day_report_sheets(day,ledger,day_stock,analysis,closure)
+    export_button("GoldenPalace_Day_"+day.isoformat(),report)
+    if not closure and actor["role"]=="admin" and day==store.today():
+        with st.form("close_day"):
+            st.warning(t("Close warning"))
+            confirm=st.checkbox(t("Confirm closing"))
+            password=st.text_input(t("Approval password"),type="password",key="password_close")
+            if st.form_submit_button(t("Close day"),type="primary",disabled=stock.empty):
                 try:
-                    st.session_state['recognized_invoices'][image_hash] = (
-                        extract_invoice_data(
-                            invoice_file, st.session_state.get('live_stock')
-                        )
-                    )
-                except Exception as recognition_error:
-                    st.error(f"{invoice_file.name}: {recognition_error}")
+                    if not confirm:raise AppError("Confirm closing")
+                    store.close_day(token,password,day,analysis,state["revision"])
+                    success()
+                except Exception as error:show_error(error)
 
-for image_hash, recognized in list(st.session_state['recognized_invoices'].items()):
-    invoice_label = recognized.get("invoice_number") or "فاتورة بلا رقم"
-    with st.expander(f"🧾 مراجعة {invoice_label}", expanded=True):
-        confidence = float(recognized.get("confidence", 0) or 0)
-        if confidence < 0.85:
-            st.warning(
-                f"دقة القراءة المعلنة {confidence:.0%}. راجع كل سطر قبل الاعتماد."
-            )
-        for warning in recognized.get("warnings", []):
-            st.warning(str(warning))
-        st.caption(f"محرك القراءة: {recognized.get('ocr_engine', 'EasyOCR المجاني')}")
-        with st.expander("🔧 عرض نص OCR الخام للتدقيق", expanded=False):
-            st.text(recognized.get("ocr_text", ""))
 
-        raw_items = pd.DataFrame(recognized.get("items", []))
-        if raw_items.empty:
-            st.error("لم يتم التعرف على أي مادة في هذه الصورة.")
-            continue
-        review_items = raw_items.rename(columns={
-            "item_code": "رمز المادة",
-            "item_name": "اسم المادة",
-            "quantity": "الكمية",
-        })[["رمز المادة", "اسم المادة", "الكمية"]]
+def imports_panel(store,token,state,stock):
+    with st.expander(t("Upload stock"),expanded=stock.empty):
+        uploaded=st.file_uploader(t("Upload stock"),type=["xlsx","xls"],key="stock_report")
+        if uploaded:
+            try:
+                df=read_stock_report(uploaded.getvalue())
+                # Existing history can fill codes but never determines opening quantities.
+                history=store.movement_history(token)
+                if not history.empty:df=enrich_stock_codes(df,history)
+                table(visible_frame(df.head(12)))
+                st.caption(f"{len(df):,} "+t("Items"))
+                with st.form("stock_import"):
+                    st.warning(t("Baseline warning"))
+                    confirmed=st.checkbox(t("Confirm baseline"))
+                    password=st.text_input(t("Approval password"),type="password",key="password_stock")
+                    if st.form_submit_button(t("Import"),type="primary"):
+                        if not confirmed:raise AppError("Confirm baseline")
+                        store.replace_stock(token,password,df,nonce("baseline"),state["revision"])
+                        success("baseline")
+            except Exception as error:show_error(error)
+    with st.expander(t("Upload history")):
+        uploaded=st.file_uploader(t("Upload history"),type=["xlsx","xls"],key="history_report")
+        if uploaded:
+            try:
+                raw=uploaded.getvalue();df=read_movement_report(raw)
+                table(df.head(12));st.caption(f"{len(df):,} "+t("Movements"))
+                st.info(t("History hint"))
+                now=utcnow().astimezone(store.tz)
+                with st.form("history_import"):
+                    a,b=st.columns(2)
+                    day=a.date_input(t("History cutoff"),value=now.date(),max_value=now.date())
+                    clock=b.time_input(t("Time"),value=now.time().replace(second=0,microsecond=0),step=60)
+                    password=st.text_input(t("Approval password"),type="password",key="password_history")
+                    if st.form_submit_button(t("Import"),type="primary"):
+                        as_of=datetime.combine(day,clock,tzinfo=store.tz)
+                        store.import_history(token,password,df,hashlib.sha256(raw).hexdigest(),as_of,nonce("history"))
+                        success("history")
+            except Exception as error:show_error(error)
 
-        with st.form(f"invoice_review_{image_hash}"):
-            review_col1, review_col2 = st.columns([1.25, 0.75])
-            with review_col1:
-                invoice_reference = st.text_input(
-                    "رقم الفاتورة",
-                    value=str(recognized.get("invoice_number", "")),
-                    key=f"invoice_number_{image_hash}",
-                )
-            with review_col2:
-                movement_type = st.selectbox(
-                    "تأثير الفاتورة",
-                    options=["OUT", "IN"],
-                    index=0 if recognized.get("movement_type") == "OUT" else 1,
-                    format_func=lambda value: "إخراج / بيع" if value == "OUT" else "إدخال / شراء أو مرتجع",
-                    key=f"invoice_type_{image_hash}",
-                )
-            edited_items = st.data_editor(
-                review_items,
-                use_container_width=True,
-                hide_index=True,
-                num_rows="dynamic",
-                key=f"invoice_items_{image_hash}",
-            )
-            invoice_password = st.text_input(
-                "كلمة مرور المستخدم لاعتماد هذه العملية",
-                type="password",
-                key=f"invoice_password_{image_hash}",
-            )
-            post_invoice = st.form_submit_button(
-                "اعتماد الفاتورة وتحديث المخزون",
-                type="primary",
-                use_container_width=True,
-            )
 
-            if post_invoice:
+def settings_page(store,token,state,stock,actor):
+    section("Settings")
+    with st.container(border=True):
+        section("Cloud storage","Cloud hint")
+        st.caption("Supabase PostgreSQL | "+state["timezone"]+" | revision "+str(state["revision"]))
+        st.caption("Independent scheduled backups must be enabled separately using the included workflow. Cloud saving is not itself an off-site backup.")
+    if actor["role"]=="admin":
+        section("Import data")
+        imports_panel(store,token,state,stock)
+        with st.expander(t("Reorder settings")):
+            settings=state["settings"]
+            with st.form("settings_form"):
+                a,b,c=st.columns(3)
+                lead=a.number_input(t("Lead days"),min_value=1,max_value=730,value=int(settings["lead_days"]))
+                safety=b.number_input(t("Safety days"),min_value=0,max_value=365,value=int(settings["safety_days"]))
+                slow=c.number_input(t("Slow days"),min_value=30,max_value=730,value=int(settings["slow_days"]))
+                a,b=st.columns(2)
+                demand=a.number_input(t("Demand days"),min_value=7,max_value=730,value=int(settings["demand_window_days"]))
+                review=b.number_input(t("Review days"),min_value=1,max_value=365,value=int(settings["review_days"]))
+                prefixes=st.text_input(t("Purchase prefixes"),value=", ".join(settings["purchase_prefixes"]))
+                password=st.text_input(t("Approval password"),type="password",key="password_settings")
+                if st.form_submit_button(t("Save"),type="primary"):
+                    try:
+                        store.save_settings(token,password,dict(lead_days=lead,safety_days=safety,slow_days=slow,demand_window_days=demand,review_days=review,
+                            purchase_prefixes=[p.strip() for p in prefixes.replace("\u060c",",").split(",") if p.strip()]))
+                        success()
+                    except Exception as error:show_error(error)
+        with st.expander(t("Users")):
+            users=store.list_users(token);table(pd.DataFrame(users))
+            with st.form("new_user",clear_on_submit=True):
+                section("New user")
+                a,b=st.columns(2)
+                username=a.text_input(t("Username"),key="new_username")
+                display=b.text_input(t("Display name"),key="new_display")
+                role=st.selectbox(t("Role"),["store","admin"],format_func=t,key="new_role")
+                newpass=st.text_input(t("New password"),type="password",key="password_newuser")
+                password=st.text_input(t("Approval password"),type="password",key="password_useradmin")
+                if st.form_submit_button(t("Save"),type="primary"):
+                    try:store.create_user(token,password,username,newpass,role,display);success()
+                    except Exception as error:show_error(error)
+            other_users=[r["username"] for r in users if r["username"]!=actor["username"]]
+            if other_users:
+                with st.form("user_status"):
+                    username=st.selectbox(t("Username"),other_users,key="status_username")
+                    active=st.checkbox(t("Active"),value=True)
+                    password=st.text_input(t("Approval password"),type="password",key="password_status")
+                    if st.form_submit_button(t("Save")):
+                        try:store.set_user_active(token,password,username,active);success()
+                        except Exception as error:show_error(error)
+        with st.expander(t("Snapshot")):
+            st.caption("This export includes business data and password hashes, not login sessions. Keep it private. The scheduled backup uses encryption.")
+            if st.button(t("Prepare export"),key="snapshot_export"):
+                snapshot=store.export_snapshot(token)
+                data=gzip.compress(json.dumps(snapshot,ensure_ascii=False,allow_nan=False).encode(),compresslevel=6)
+                st.download_button(t("Download"),data,file_name="GoldenPalace_"+store.today().isoformat()+".json.gz",mime="application/gzip",key="snapshot_download")
+        with st.expander(t("Audit")):
+            if st.button(t("Refresh"),key="audit_load"):
+                table(store.audit(token))
+    with st.expander(t("Change password")):
+        with st.form("change_password",clear_on_submit=True):
+            old=st.text_input(t("Password"),type="password",key="password_old")
+            new=st.text_input(t("New password"),type="password",key="password_new")
+            confirm=st.text_input(t("Confirm password"),type="password",key="password_confirm")
+            if st.form_submit_button(t("Save"),type="primary"):
                 try:
-                    if st.session_state['live_stock'] is None:
-                        raise ValueError("حمّل تقرير المخزون قبل اعتماد الفاتورة.")
-                    if not verify_operation_password(invoice_password):
-                        raise ValueError("كلمة المرور غير صحيحة؛ لم تُنفذ العملية.")
-                    invoice_reference = str(invoice_reference).strip()
-                    if not invoice_reference:
-                        raise ValueError("رقم الفاتورة مطلوب.")
-                    previous_invoice = invoice_already_posted(invoice_reference, image_hash)
-                    if previous_invoice:
-                        raise ValueError(
-                            f"الفاتورة/الصورة منفذة سابقاً تحت المرجع {previous_invoice}."
-                        )
+                    if new!=confirm:raise AppError("Passwords do not match")
+                    store.change_password(token,old,new);success()
+                except Exception as error:show_error(error)
 
-                    stock_df = st.session_state['live_stock']
-                    changes = []
-                    unmatched = []
-                    for _, item in edited_items.iterrows():
-                        code = normalize_item_code(item.get("رمز المادة", ""))
-                        name_key = normalize_item_name(item.get("اسم المادة", ""))
-                        quantity = pd.to_numeric(item.get("الكمية"), errors="coerce")
-                        code_match = stock_df[
-                            stock_df["رمز المادة"].map(normalize_item_code) == code
-                        ] if code else pd.DataFrame()
-                        name_match = stock_df[
-                            stock_df["مفتاح المطابقة"] == name_key
-                        ] if name_key else pd.DataFrame()
-                        match = code_match if not code_match.empty else name_match
-                        if match.empty or len(match) > 1 or pd.isna(quantity):
-                            unmatched.append(f"{code} {item.get('اسم المادة', '')}".strip())
-                            continue
-                        changes.append({
-                            "row_index": int(match.index[0]),
-                            "movement_type": movement_type,
-                            "quantity": float(quantity),
-                        })
-                    if unmatched:
-                        raise ValueError(
-                            "مواد غير مطابقة بشكل آمن: " + "، ".join(unmatched[:8])
-                        )
-                    if not changes:
-                        raise ValueError("لا توجد مواد صالحة للاعتماد.")
 
-                    grouped_changes = {}
-                    for change in changes:
-                        group_key = (change["row_index"], change["movement_type"])
-                        grouped_changes[group_key] = (
-                            grouped_changes.get(group_key, 0) + change["quantity"]
-                        )
-                    changes = [
-                        {
-                            "row_index": row_index,
-                            "movement_type": line_type,
-                            "quantity": quantity,
-                        }
-                        for (row_index, line_type), quantity in grouped_changes.items()
-                    ]
+def main():
+    if st.session_state.pop("wipe_passwords",False):
+        for key in list(st.session_state):
+            if key.startswith("password_") or key=="login_password":st.session_state.pop(key,None)
+    try:
+        config=dict(st.secrets.get("database",{}))
+        auth=dict(st.secrets.get("auth",{}))
+        app_config=dict(st.secrets.get("app",{}))
+        if not config:raise AppError("Complete the database settings in Streamlit Secrets")
+        store=get_store(json.dumps(config,sort_keys=True))
+        store.initialize(auth.get("bootstrap_username","admin"),auth.get("bootstrap_password",""),app_config.get("timezone","Asia/Damascus"))
+    except Exception as error:
+        if isinstance(error,AppError):st.warning(t(str(error)))
+        else:show_error(error)
+        st.info("Setup: run sql/setup.sql in Supabase, then copy secrets.example.toml into Streamlit Secrets and fill your own database credentials. No local fallback is enabled.")
+        st.code("database.host / database.user / database.password / database.dbname\nauth.bootstrap_username / auth.bootstrap_password",language="text")
+        return
+    token=st.session_state.get("token")
+    if not token:
+        with st.container(key="login"):
+            section("Sign in")
+            with st.form("login"):
+                username=st.text_input(t("Username"),key="login_username")
+                password=st.text_input(t("Password"),type="password",key="login_password")
+                if st.form_submit_button(t("Sign in"),type="primary",width="stretch"):
+                    try:
+                        st.session_state["token"]=store.login(username,password,int(auth.get("session_hours",12)))
+                        st.session_state["wipe_passwords"]=True
+                        st.rerun()
+                    except Exception as error:show_error(error)
+            st.caption(t("Cloud hint"))
+        return
+    try:
+        actor=store.actor(token)
+        state=store.state(token)
+        stock=store.stock(token)
+        daily=store.ledger(token,store.today())
+    except AppError as error:
+        st.session_state.pop("token",None);st.error(t(str(error)))
+        if st.button(t("Sign in")):st.rerun()
+        return
+    except Exception as error:
+        show_error(error)
+        if st.button(t("Refresh")):st.rerun()
+        return
+    a,b,c=st.columns([5,1,1])
+    stamp=aware(state["updated_at"]).astimezone(store.tz).strftime("%Y-%m-%d %H:%M:%S")
+    a.markdown(status_html(actor,stamp),unsafe_allow_html=True)
+    if b.button(t("Refresh"),width="stretch",key="global_refresh"):st.rerun()
+    with c.popover(t("Account"),width="stretch"):
+        st.write(actor["display_name"]+" / "+t(actor["role"]))
+        if st.button(t("Sign out"),width="stretch"):
+            try:store.logout(token)
+            finally:
+                st.session_state.clear()
+                st.rerun()
+    flash=st.session_state.pop("flash",None)
+    if flash:st.success(flash)
+    nav=["Stock","Invoices","Movements","Analysis","Closing","Settings"]
+    with st.container(key="navigation"):
+        page=st.segmented_control(t("Inventory"),nav,default="Stock",format_func=t,key="page",label_visibility="collapsed",width="stretch") or "Stock"
+    if page not in ("Analysis",):
+        alerts=int(daily["without_invoice"].sum()) if not daily.empty else 0
+        st.markdown(kpis_html([("Items",f"{len(stock):,}","Stock"),("Available",f"{int((stock[COL_QTY]>0).sum()):,}","Items"),
+                               ("Movements",len(daily),"Today"),("Without invoice",alerts,"Today")]),unsafe_allow_html=True)
+    try:
+        if page=="Stock":stock_page(store,token,state,stock)
+        elif page=="Invoices":invoices_page(store,token,state,stock)
+        elif page=="Movements":movements_page(store,token,state,stock)
+        elif page=="Analysis":analysis_page(store,token,state,stock)
+        elif page=="Closing":closing_page(store,token,state,stock,actor)
+        elif page=="Settings":settings_page(store,token,state,stock,actor)
+    except Exception as error:show_error(error)
+    st.markdown('<div class="gp-foot">GOLDEN PALACE / '+BUILD+'</div>',unsafe_allow_html=True)
 
-                    normalized_lines = sorted(
-                        (change["row_index"], change["movement_type"], change["quantity"])
-                        for change in changes
-                    )
-                    fingerprint = hashlib.sha256(
-                        json.dumps(
-                            [image_hash, invoice_reference, normalized_lines],
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                    ).hexdigest()
-                    approved_payload = dict(recognized)
-                    approved_payload["reviewed_items"] = edited_items.to_dict("records")
-                    updated_stock, _ = post_stock_operation(
-                        stock_df,
-                        changes,
-                        {
-                            "fingerprint": fingerprint,
-                            "username": current_user,
-                            "source": "INVOICE",
-                            "invoice_reference": invoice_reference,
-                            "without_invoice": False,
-                            "delivery_note": True,
-                            "reason": "فاتورة معترف عليها من الصورة ومراجعة من المستخدم",
-                        },
-                        invoice_payload=approved_payload,
-                    )
-                    st.session_state['live_stock'] = updated_stock
-                    del st.session_state['recognized_invoices'][image_hash]
-                    st.session_state["invoice_flash"] = (
-                        f"تم حفظ الفاتورة {invoice_reference} وتحديث {len(changes)} مادة."
-                    )
-                    st.rerun()
-                except Exception as posting_error:
-                    st.error(str(posting_error))
 
-# ==========================================
-# 3. MOVEMENT ANALYSIS, REORDER & CLEARANCE
-# ==========================================
-invoice_tab.__exit__(None, None, None)
-analysis_tab.__enter__()
-inventory_analysis = pd.DataFrame()
-analysis_movement_df = st.session_state['movement_history']
-ledger_history = ledger_as_movement_history()
-if not ledger_history.empty:
-    analysis_movement_df = (
-        pd.concat([analysis_movement_df, ledger_history], ignore_index=True)
-        if analysis_movement_df is not None
-        else ledger_history
-    )
-
-if st.session_state['live_stock'] is not None and analysis_movement_df is not None:
-    st.divider()
-    st.subheader("📊 تحليل حركة المخزون وإعادة الطلب")
-    with st.expander("⚙️ إعدادات قرار إعادة الطلب والتصريف", expanded=False):
-        setting_col1, setting_col2, setting_col3 = st.columns(3)
-        with setting_col1:
-            lead_days = st.number_input(
-                "مدة التوريد بالأيام", min_value=1, value=30, step=1
-            )
-        with setting_col2:
-            safety_days = st.number_input(
-                "مخزون الأمان بالأيام", min_value=0, value=15, step=1
-            )
-        with setting_col3:
-            slow_days = st.number_input(
-                "يُعد بطيئاً بعد عدم خروج لمدة", min_value=30, value=90, step=15
-            )
-        setting_col4, setting_col5 = st.columns(2)
-        with setting_col4:
-            demand_window_days = st.number_input(
-                "فترة قياس الطلب الحديث (يوم)",
-                min_value=30,
-                value=90,
-                step=30,
-            )
-        with setting_col5:
-            review_days = st.number_input(
-                "الفترة حتى مراجعة الطلب القادمة (يوم)",
-                min_value=7,
-                value=30,
-                step=7,
-            )
-        purchase_prefix_text = st.text_input(
-            "مراجع حركات الشراء/التوريد",
-            value="إد.م. م. م.",
-            help=(
-                "افصل أكثر من بداية مرجع بفاصلة. لا تُحسب أرصدة البداية أو "
-                "تسويات الجرد أو المرتجعات كشراء إلا إذا أضفت مرجعها هنا."
-            ),
-        )
-        purchase_prefixes = [
-            part.strip()
-            for part in purchase_prefix_text.replace("،", ",").split(",")
-            if part.strip()
-        ]
-        st.caption(
-            "القرار يجمع الرصيد الحالي، الطلب الحديث، تغطية المخزون، اتجاه الطلب، "
-            "وموعد آخر شراء/توريد مطابق للمراجع أعلاه."
-        )
-
-    inventory_analysis = build_inventory_analysis(
-        st.session_state['live_stock'],
-        analysis_movement_df,
-        int(lead_days),
-        int(safety_days),
-        int(slow_days),
-        int(demand_window_days),
-        int(review_days),
-        purchase_prefixes,
-    )
-    reorder_df = inventory_analysis[
-        inventory_analysis["حالة الطلب"] == "إعادة طلب"
-    ].copy()
-    fast_df = inventory_analysis[
-        inventory_analysis["سرعة الحركة"] == "سريعة"
-    ].copy()
-    slow_df = inventory_analysis[
-        inventory_analysis["اقتراح التصريف"] == "مرشح للتصريف"
-    ].copy()
-    no_invoice_df = pd.DataFrame([
-        row for row in st.session_state['manual_movements']
-        if row.get("بدون فاتورة") == "نعم"
-    ])
-
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("مواد تحتاج إعادة طلب", f"{len(reorder_df):,}")
-    kpi2.metric("مواد سريعة الحركة", f"{len(fast_df):,}")
-    kpi3.metric("مواد مرشحة للتصريف", f"{len(slow_df):,}")
-    kpi4.metric("حركات يدوية بدون فاتورة", f"{len(no_invoice_df):,}")
-
-    reorder_tab, fast_tab, slow_tab, control_tab = st.tabs([
-        "🛒 إعادة الطلب",
-        "⚡ سريعة الحركة",
-        "🐢 بطيئة / للتصريف",
-        "🚨 رقابة الحركات اليدوية",
-    ])
-    with reorder_tab:
-        st.dataframe(
-            reorder_df[[
-                "أولوية الطلب", "رمز المادة", "اسم المادة", "الكمية",
-                f"خروج آخر {int(demand_window_days)} يوم",
-                "الخروج اليومي الحديث", "تغطية المخزون بالأيام", "اتجاه الطلب",
-                "آخر شراء/توريد", "كمية آخر شراء/توريد",
-                "أيام منذ آخر شراء/توريد", "متوسط فترة التوريد",
-                "حد إعادة الطلب", "كمية الطلب المقترحة", "سبب القرار",
-            ]],
-            use_container_width=True,
-            hide_index=True,
-        )
-    with fast_tab:
-        st.dataframe(
-            fast_df[[
-                "رمز المادة", "اسم المادة", "الكمية", "إجمالي الإخراج",
-                "عدد الحركات", "آخر إخراج", "حالة الطلب",
-            ]],
-            use_container_width=True,
-            hide_index=True,
-        )
-    with slow_tab:
-        st.warning("هذه القائمة للمراجعة التجارية قبل الخصم أو التصفية، وليست أمراً آلياً.")
-        st.dataframe(
-            slow_df[[
-                "رمز المادة", "اسم المادة", "الكمية", "إجمالي الإخراج",
-                "أيام منذ آخر خروج", "سرعة الحركة", "اقتراح التصريف",
-            ]],
-            use_container_width=True,
-            hide_index=True,
-        )
-    with control_tab:
-        if no_invoice_df.empty:
-            st.success("لا توجد حركات يدوية مسجلة بدون فاتورة / مرجع.")
-        else:
-            st.error(
-                f"تنبيه رقابي: توجد {len(no_invoice_df)} حركة يدوية بدون فاتورة / مرجع."
-            )
-            st.dataframe(no_invoice_df, use_container_width=True, hide_index=True)
-
-# ==========================================
-# 4. MANUAL IN / OUT STOCK MOVEMENTS
-# ==========================================
-analysis_tab.__exit__(None, None, None)
-manual_tab.__enter__()
-st.divider()
-st.subheader("📝 حركة المخزون اليدوية (إدخال / إخراج)")
-flash = st.session_state.pop('manual_movement_flash', None)
-if flash:
-    if flash.get("without_invoice"):
-        st.warning(flash["message"])
-    else:
-        st.success(flash["message"])
-
-if st.session_state['live_stock'] is None:
-    st.info("حمّل تقرير المخزون أولاً لتسجيل حركة يدوية.")
-else:
-    live_stock_for_form = st.session_state['live_stock']
-
-    def manual_item_label(row_index):
-        row = live_stock_for_form.loc[row_index]
-        code = str(row.get('رمز المادة', '') or '').strip()
-        name = str(row.get('اسم المادة', '') or '').strip()
-        return f"{code} — {name}" if code else name
-
-    with st.form("manual_movement_form"):
-        m_col1, m_col2, m_col3 = st.columns([1.8, 1, 0.8])
-        with m_col1:
-            m_row_index = st.selectbox(
-                "المادة",
-                options=live_stock_for_form.index.tolist(),
-                format_func=manual_item_label,
-            )
-        with m_col2:
-            m_type = st.selectbox(
-                "نوع الحركة",
-                ["إدخال (IN - زيادة المخزون)", "إخراج (OUT - خصم من المخزون)"],
-            )
-        with m_col3:
-            m_qty = st.number_input("الكمية", min_value=0.0, step=1.0)
-
-        reference_col, reason_col = st.columns(2)
-        with reference_col:
-            m_reference = st.text_input(
-                "رقم الفاتورة / المرجع (اختياري)",
-                help="إذا تُرك فارغاً ستُنفذ الحركة مع تسجيل تنبيه رقابي واضح.",
-            )
-        with reason_col:
-            m_note = st.text_input("ملاحظات / سبب الحركة")
-
-        operation_password = st.text_input(
-            "كلمة مرور المستخدم لتنفيذ هذه الحركة",
-            type="password",
-            help="تُطلب كلمة المرور في كل عملية إدخال أو إخراج ولا يتم حفظها في السجل.",
-        )
-
-        delivery_note_received = True
-        if "إخراج" in m_type:
-            st.warning(
-                "⚠️ وصل التسليم مطلوب لحركة الإخراج اليدوي، حتى عند عدم وجود فاتورة."
-            )
-            delivery_note_received = st.checkbox(
-                "✅ أؤكد استلام وصل التسليم الخاص بهذه الحركة"
-            )
-
-        m_submit = st.form_submit_button(
-            "تنفيذ الحركة اليدوية وتحديث المخزون", use_container_width=True
-        )
-
-        if m_submit:
-            selected_row = st.session_state['live_stock'].loc[m_row_index]
-            before_qty = float(selected_row['الكمية'])
-            movement_kind = "IN" if "إدخال" in m_type else "OUT"
-            without_invoice = not str(m_reference).strip()
-
-            if m_qty <= 0:
-                st.warning("⚠️ يرجى إدخال كمية صحيحة أكبر من صفر.")
-            elif not verify_operation_password(operation_password):
-                st.error("❌ كلمة المرور غير صحيحة؛ لم تُنفذ العملية.")
-            elif not str(m_note).strip():
-                st.warning("⚠️ يرجى كتابة سبب الحركة اليدوية.")
-            elif movement_kind == "OUT" and not delivery_note_received:
-                st.error("❌ لا يمكن تنفيذ الإخراج قبل تأكيد استلام وصل التسليم.")
-            elif movement_kind == "OUT" and m_qty > before_qty:
-                st.error(
-                    f"❌ الكمية المطلوبة ({m_qty:g}) أكبر من الرصيد الحالي ({before_qty:g})."
-                )
-            else:
-                try:
-                    fingerprint = hashlib.sha256(
-                        st.session_state['manual_operation_nonce'].encode("utf-8")
-                    ).hexdigest()
-                    updated_stock, ledger_rows = post_stock_operation(
-                        st.session_state['live_stock'],
-                        [{
-                            "row_index": int(m_row_index),
-                            "movement_type": movement_kind,
-                            "quantity": float(m_qty),
-                        }],
-                        {
-                            "fingerprint": fingerprint,
-                            "username": current_user,
-                            "source": "MANUAL",
-                            "invoice_reference": str(m_reference).strip(),
-                            "without_invoice": without_invoice,
-                            "delivery_note": delivery_note_received,
-                            "reason": str(m_note).strip(),
-                        },
-                    )
-                    st.session_state['live_stock'] = updated_stock
-                    st.session_state['manual_movements'] = load_manual_movements()
-                    after_qty = float(ledger_rows[0][13])
-                    message = (
-                        f"🚨 تم الحفظ تلقائياً، لكن الحركة {movement_kind} بلا فاتورة / مرجع."
-                        if without_invoice
-                        else f"✅ تم حفظ حركة {movement_kind} تلقائياً. الرصيد الجديد {after_qty:g}."
-                    )
-                    st.session_state['manual_movement_flash'] = {
-                        "message": message,
-                        "without_invoice": without_invoice,
-                    }
-                    st.session_state['manual_operation_nonce'] = str(uuid.uuid4())
-                    st.rerun()
-                except Exception as movement_error:
-                    st.error(str(movement_error))
-
-    if st.session_state['manual_movements']:
-        with st.expander(
-            f"📋 سجل الحركات اليدوية ({len(st.session_state['manual_movements'])})",
-            expanded=False,
-        ):
-            manual_log_df = pd.DataFrame(st.session_state['manual_movements'])
-            st.dataframe(manual_log_df, use_container_width=True, hide_index=True)
-            without_invoice_count = int(
-                (manual_log_df["بدون فاتورة"] == "نعم").sum()
-            )
-            if without_invoice_count:
-                st.error(
-                    f"🚨 {without_invoice_count} حركة يدوية تحتاج مراجعة لأنها بلا فاتورة / مرجع."
-                )
-
-# ==========================================
-# 5. LIVE STOCK & END OF DAY EXPORT
-# ==========================================
-manual_tab.__exit__(None, None, None)
-reports_tab.__enter__()
-if st.session_state['live_stock'] is not None:
-    st.divider()
-    st.subheader("🌙 تقرير وإقفال نهاية اليوم")
-    report_date_col, report_status_col = st.columns([0.45, 1.55])
-    with report_date_col:
-        end_of_day_date = st.date_input(
-            "تاريخ التقرير", value=datetime.now().date(), key="end_of_day_date"
-        )
-    closure = daily_closure_for_date(end_of_day_date)
-    with report_status_col:
-        if closure:
-            st.success(
-                f"اليوم مقفل بواسطة {closure['username']} بتاريخ {closure['closed_at']}"
-            )
-        else:
-            st.info("التقرير مباشر. الإقفال يثبت ملخص اليوم في سجل التدقيق.")
-
-    report_stock = load_daily_stock_snapshot(end_of_day_date)
-    if report_stock is None:
-        report_stock = st.session_state['live_stock']
-    end_report_bytes, end_ledger, affected_items = build_end_of_day_report(
-        end_of_day_date,
-        report_stock,
-        inventory_analysis,
-    )
-    day_in = float(
-        end_ledger.loc[end_ledger["movement_type"] == "IN", "quantity"].sum()
-    ) if not end_ledger.empty else 0
-    day_out = float(
-        end_ledger.loc[end_ledger["movement_type"] == "OUT", "quantity"].sum()
-    ) if not end_ledger.empty else 0
-    day_alerts = int(end_ledger["without_invoice"].sum()) if not end_ledger.empty else 0
-    eod1, eod2, eod3, eod4 = st.columns(4)
-    eod1.metric("حركات اليوم", len(end_ledger))
-    eod2.metric("إجمالي الإدخال", f"{day_in:g}")
-    eod3.metric("إجمالي الإخراج", f"{day_out:g}")
-    eod4.metric("بدون فاتورة", day_alerts)
-
-    if not end_ledger.empty:
-        with st.expander("عرض حركات اليوم والمواد المتأثرة", expanded=False):
-            st.dataframe(end_ledger, use_container_width=True, hide_index=True)
-            if not affected_items.empty:
-                st.dataframe(
-                    affected_items.drop(columns=["item_key"], errors="ignore"),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-    eod_download_col, eod_close_col = st.columns(2)
-    with eod_download_col:
-        st.download_button(
-            "📥 تنزيل تقرير نهاية اليوم الكامل",
-            data=end_report_bytes,
-            file_name=f"GoldenPalace_EndOfDay_{end_of_day_date:%Y-%m-%d}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    with eod_close_col:
-        with st.form("close_business_day_form"):
-            close_password = st.text_input(
-                "كلمة المرور لإقفال اليوم", type="password"
-            )
-            close_clicked = st.form_submit_button(
-                "🔒 إقفال وتثبيت ملخص اليوم",
-                use_container_width=True,
-                disabled=closure is not None,
-            )
-            if close_clicked:
-                if not verify_operation_password(close_password):
-                    st.error("كلمة المرور غير صحيحة؛ لم يتم إقفال اليوم.")
-                else:
-                    close_business_day(
-                        end_of_day_date,
-                        current_user,
-                        st.session_state['live_stock'],
-                    )
-                    st.success("تم إقفال اليوم وتثبيت ملخصه في سجل التدقيق.")
-                    st.rerun()
-
-    st.divider()
-    st.subheader("حالة المخزون المباشر الحالية")
-    display_searchable_table(st.session_state['live_stock'], "live_stock")
-    
-    if is_admin:
-        st.divider()
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            export_stock = st.session_state['live_stock'].drop(
-                columns=['مفتاح المطابقة', 'مفتاح المخزون'], errors='ignore'
-            )
-            export_stock.to_excel(writer, index=False, sheet_name='Final_Stock')
-            if not inventory_analysis.empty:
-                export_analysis = inventory_analysis.drop(
-                    columns=['مفتاح المطابقة', 'رمز الحركة', 'اسم الحركة'],
-                    errors='ignore',
-                )
-                export_analysis.to_excel(
-                    writer, index=False, sheet_name='Movement_Analysis'
-                )
-                export_analysis[
-                    export_analysis['حالة الطلب'] == 'إعادة طلب'
-                ].to_excel(writer, index=False, sheet_name='Reorder_List')
-                export_analysis[
-                    export_analysis['اقتراح التصريف'] == 'مرشح للتصريف'
-                ].to_excel(writer, index=False, sheet_name='Slow_Clearance')
-            if st.session_state['movement_history'] is not None:
-                st.session_state['movement_history'].drop(
-                    columns=['مفتاح المطابقة'], errors='ignore'
-                ).to_excel(writer, index=False, sheet_name='Movement_History')
-            if st.session_state['manual_movements']:
-                manual_export = pd.DataFrame(st.session_state['manual_movements'])
-                manual_export.to_excel(
-                    writer, index=False, sheet_name='Manual_Movements'
-                )
-                manual_export[
-                    manual_export['بدون فاتورة'] == 'نعم'
-                ].to_excel(writer, index=False, sheet_name='No_Invoice_Alerts')
-        processed_excel = output.getvalue()
-        
-        st.download_button(
-            label="💾 استخراج تقرير الجرد والتحليل المحدّث - Excel",
-            data=processed_excel,
-            file_name="GoldenPalace_Inventory_Movement_Analysis.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True
-        )
-
-reports_tab.__exit__(None, None, None)
+if __name__=="__main__":
+    main()
