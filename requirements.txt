@@ -3,4 +3,4 @@ pandas
 Pillow
 openpyxl
 xlrd
-pytesseract
+easyocr==1.7.2
