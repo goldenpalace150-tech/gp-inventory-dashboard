@@ -8,7 +8,7 @@ from gp_core import *
 from gp_store import Store,utcnow
 from gp_reports import excel_bytes
 from gp_ocr import _run_ocr_worker,_ocr_scan_lock
-from invoice_ocr_worker import parse_codes,parse_quantity,parse_summary,_prepare_crop
+from invoice_ocr_worker import parse_codes,parse_quantity,parse_summary
 from PIL import Image
 
 
@@ -53,31 +53,34 @@ def test_history_import_no_stock_deduction():
     assert len(s.movement_history(t))==1
 
 
-def test_crop_strict_pixel_bound():
-    image=Image.new("RGB",(3000,4000),"white")
-    prepared,_=_prepare_crop(image,(0,0,3000,4000))
-    assert max(prepared.size)<=768
+def test_import_float_tail_normalizes_to_four_places():
+    s=Store.for_tests();pw="Test-Password-2026";s.initialize(password=pw);t=s.login("admin",pw)
+    stock=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"010716",COL_NAME:"Camera",COL_QTY:3.0000000000000004}]))
+    s.replace_stock(t,pw,stock,"base-float",s.state(t)["revision"])
+    assert s.stock(t).iloc[0][COL_QTY]==3
 
 
 def test_codes_no_fuzzy_padding():
-    boxes=[{"text":"010716","confidence":.9,"y":100},
-           {"text":"abc","confidence":.9,"y":200}]
-    rows=parse_codes(boxes,1000)
+    boxes=[{"text":"010716","score":.9,"x":900,"y":400},
+           {"text":"abc","score":.9,"x":900,"y":500}]
+    rows=parse_codes(boxes,1000,1200)
     assert len(rows)==1 and rows[0]["code"]=="010716"
 
 
 def test_quantity_ambiguity_blank():
-    boxes=[{"text":"3.00","confidence":.9,"y":100},{"text":"4.00","confidence":.9,"y":101}]
-    assert parse_quantity(boxes,100,20) is None
+    boxes=[{"text":"3.00","score":.9,"x":280,"y":400},{"text":"4.00","score":.9,"x":281,"y":401}]
+    assert parse_quantity(boxes,400,1000,1200) is None
 
 
 def test_quantity_parser():
-    assert parse_quantity([{"text":"3.00","confidence":.9,"y":100}],100,20)==3
+    boxes=[{"text":"3.00","score":.9,"x":280,"y":400}]
+    assert parse_quantity(boxes,400,1000,1200)==3
 
 
-def test_reference_ambiguity_blank():
-    boxes=[{"text":"8042","confidence":.9,"y":100},{"text":"8043","confidence":.9,"y":120}]
-    assert parse_summary(boxes)[0]==""
+def test_reference_parser_prefers_strong_candidate():
+    boxes=[{"text":"8042","score":.95,"x":100,"y":760},{"text":"9.00","score":.9,"x":100,"y":850}]
+    reference,total=parse_summary(boxes,1000,1200)
+    assert reference=="8042"
 
 
 def test_scan_lock_is_shared():
@@ -124,7 +127,13 @@ def test_web_process_has_no_neural_network_imports():
         for node in ast.walk(tree):
             if isinstance(node,ast.Import):imports += [n.name for n in node.names]
             if isinstance(node,ast.ImportFrom):imports.append(node.module or "")
-        assert not any(x.split(".")[0] in ("torch","easyocr","torchvision") for x in imports)
+        assert not any(x.split(".")[0] in ("torch","easyocr","torchvision","rapidocr","onnxruntime") for x in imports)
+
+
+def test_requirements_remove_torch_and_easyocr():
+    text=(Path(__file__).resolve().parents[1]/"requirements.txt").read_text().lower()
+    assert "easyocr" not in text and "torch @" not in text and "torchvision" not in text
+    assert "rapidocr" in text and "onnxruntime" in text
 
 
 def test_daily_report_preserves_sections_and_totals():

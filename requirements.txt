@@ -1,17 +1,15 @@
-# GP-OCR-CPU-LITE-v4 -- Streamlit Cloud, Python 3.11 on Linux x86_64.
-# Direct official CPU wheels prevent CUDA/NVIDIA dependency selection.
-torch @ https://download.pytorch.org/whl/cpu/torch-2.6.0%2Bcpu-cp311-cp311-linux_x86_64.whl
-torchvision @ https://download.pytorch.org/whl/cpu/torchvision-0.21.0%2Bcpu-cp311-cp311-linux_x86_64.whl
 streamlit==1.63.0
 pandas>=2.2,<4
 Pillow>=10.4,<13
 openpyxl>=3.1.5,<4
 xlrd==2.0.2
-easyocr==1.7.2
 numpy==1.26.4
 opencv-python-headless==4.11.0.86
-# Your Cloud log already flags pyarrow 25 as problematic and replaces it.
 pyarrow>=14,<25
+
+# Lightweight free CPU OCR (no PyTorch/CUDA packages)
+rapidocr==3.9.2
+onnxruntime>=1.22,<2
 
 # Cloud database and encrypted backups
 SQLAlchemy>=2.0.36,<3
