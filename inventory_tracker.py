@@ -12,9 +12,11 @@ import uuid
 from datetime import datetime
 
 try:
-    import pytesseract
+    import easyocr
+    import numpy as np
 except Exception:
-    pytesseract = None
+    easyocr = None
+    np = None
 
 # ==========================================
 # PAGE CONFIGURATION & MOBILE-FRIENDLY RTL STYLING
@@ -34,7 +36,8 @@ DATABASE_PATH = str(
 ).strip()
 
 # Free/local OCR. No API key or paid credits are required.
-OCR_PREFERRED_LANGUAGES = ("ara", "eng")
+# EasyOCR is installed with pip only, so Streamlit does not need packages.txt / apt.
+OCR_PREFERRED_LANGUAGES = ("ar", "en")
 OCR_ARABIC_DIGITS = str.maketrans(
     "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
     "01234567890123456789",
@@ -291,19 +294,19 @@ if st.session_state['logged_in_user'] is None:
 # FREE / LOCAL INVOICE PHOTO RECOGNITION
 # ==========================================
 def free_ocr_status():
-    """Return local Tesseract availability and the installed OCR languages."""
-    if pytesseract is None:
-        return False, "", "مكتبة pytesseract غير مثبتة"
-    try:
-        version = str(pytesseract.get_tesseract_version()).splitlines()[0]
-        available = set(pytesseract.get_languages(config=""))
-    except Exception as error:
-        return False, "", f"Tesseract غير متاح: {error}"
+    """Return whether the free pip-only EasyOCR engine can be used."""
+    if easyocr is None or np is None:
+        return False, "", "مكتبة EasyOCR غير مثبتة"
+    return True, "+".join(OCR_PREFERRED_LANGUAGES), "EasyOCR مجاني (Arabic + English)"
 
-    selected = [lang for lang in OCR_PREFERRED_LANGUAGES if lang in available]
-    if not selected:
-        return False, "", "لم يتم العثور على حزم لغات OCR العربية/الإنجليزية"
-    return True, "+".join(selected), f"Tesseract {version} ({'+'.join(selected)})"
+
+@st.cache_resource(show_spinner=False)
+def get_ocr_reader():
+    """Load the OCR model once per Streamlit process."""
+    if easyocr is None:
+        raise RuntimeError("EasyOCR غير مثبتة")
+    # CPU mode keeps the app free and works on Streamlit Community Cloud.
+    return easyocr.Reader(list(OCR_PREFERRED_LANGUAGES), gpu=False, verbose=False)
 
 
 def _ocr_clean_text(value):
@@ -316,8 +319,8 @@ def _ocr_clean_text(value):
     )
 
 
-def _prepare_ocr_image(image, target_long_side=2400, min_scale=2.0, max_scale=4.0):
-    """Improve contrast/shadows and upscale small phone photos for Tesseract."""
+def _prepare_ocr_image(image, target_long_side=2200, min_scale=1.4, max_scale=3.2):
+    """Improve contrast/shadows and upscale phone photos for OCR."""
     gray = ImageOps.grayscale(image)
     gray = ImageOps.autocontrast(gray, cutoff=1)
     gray = ImageEnhance.Contrast(gray).enhance(1.25)
@@ -330,6 +333,31 @@ def _prepare_ocr_image(image, target_long_side=2400, min_scale=2.0, max_scale=4.
     return prepared, scale
 
 
+def _easy_read(image, allowlist=None, paragraph=False):
+    """Run EasyOCR and normalize its output to (bbox, text, confidence)."""
+    reader = get_ocr_reader()
+    array = np.array(image)
+    kwargs = {
+        "detail": 1,
+        "paragraph": paragraph,
+        "decoder": "greedy",
+    }
+    if allowlist:
+        kwargs["allowlist"] = allowlist
+    results = reader.readtext(array, **kwargs)
+    normalized = []
+    for result in results:
+        if not isinstance(result, (list, tuple)) or len(result) < 3:
+            continue
+        bbox, value, confidence = result[0], result[1], result[2]
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = 0.0
+        normalized.append((bbox, _ocr_clean_text(value), confidence))
+    return normalized
+
+
 def _extract_number_candidates(text):
     clean = _ocr_clean_text(text).replace(",", ".")
     return re.findall(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", clean)
@@ -338,106 +366,85 @@ def _extract_number_candidates(text):
 def _read_quantity_crop(image, row_center_y, ocr_language):
     """Read the quantity column for a detected item row on Golden Palace forms."""
     width, height = image.size
-    half_height = max(20, int(height * 0.027))
+    half_height = max(22, int(height * 0.030))
     crop = image.crop((
-        int(width * 0.22),
+        int(width * 0.20),
         max(0, int(row_center_y - half_height)),
-        int(width * 0.36),
+        int(width * 0.37),
         min(height, int(row_center_y + half_height)),
     ))
     prepared, _ = _prepare_ocr_image(
-        crop, target_long_side=900, min_scale=4.0, max_scale=6.0
+        crop, target_long_side=950, min_scale=3.0, max_scale=5.0
     )
-
-    all_candidates = []
-    for psm in (7, 6, 11):
-        text = pytesseract.image_to_string(
-            prepared,
-            lang="eng" if "eng" in ocr_language else ocr_language,
-            config=(
-                f"--oem 3 --psm {psm} "
-                "-c tessedit_char_whitelist=0123456789.,"
-            ),
-        )
+    candidates = []
+    for _, text, conf in _easy_read(prepared, allowlist="0123456789.,"):
+        if conf < 0.15:
+            continue
         for token in _extract_number_candidates(text):
             try:
                 value = float(token)
             except ValueError:
                 continue
-            if value > 0:
-                all_candidates.append((token, value))
-
-    # Decimals are especially reliable on this invoice template (3.00, 4.00, 2.00).
-    decimal_values = [value for token, value in all_candidates if "." in token]
-    if decimal_values:
-        rounded = [round(value, 4) for value in decimal_values]
-        return max(set(rounded), key=rounded.count)
-
-    # If no decimal survived OCR, choose the most repeated positive value.
-    if all_candidates:
-        rounded = [round(value, 4) for _, value in all_candidates]
-        return max(set(rounded), key=rounded.count)
-    return None
+            if 0 < value < 100000:
+                candidates.append((token, value, conf))
+    if not candidates:
+        return None
+    decimal_candidates = [row for row in candidates if "." in row[0] or "," in row[0]]
+    pool = decimal_candidates or candidates
+    pool.sort(key=lambda row: row[2], reverse=True)
+    return round(float(pool[0][1]), 4)
 
 
 def _read_invoice_reference(image, last_item_y, ocr_language):
     """Read the reference/invoice number from the summary block below the item table."""
     width, height = image.size
-    start_y = int(min(height * 0.72, last_item_y + height * 0.025))
-    end_y = int(min(height * 0.78, last_item_y + height * 0.18))
+    start_y = int(min(height * 0.72, last_item_y + height * 0.020))
+    end_y = int(min(height * 0.79, last_item_y + height * 0.18))
     if end_y <= start_y:
         start_y, end_y = int(height * 0.45), int(height * 0.72)
-
-    # On the Golden Palace delivery note the invoice/reference number is in the left half.
-    crop = image.crop((0, start_y, int(width * 0.58), end_y))
+    crop = image.crop((0, start_y, int(width * 0.60), end_y))
     prepared, _ = _prepare_ocr_image(
-        crop, target_long_side=1400, min_scale=4.0, max_scale=6.0
+        crop, target_long_side=1400, min_scale=2.5, max_scale=4.5
     )
-    for psm in (12, 11, 6):
-        text = pytesseract.image_to_string(
-            prepared,
-            lang=ocr_language,
-            config=f"--oem 3 --psm {psm}",
-        )
-        clean = _ocr_clean_text(text)
-        candidates = re.findall(r"(?<!\d)(\d{3,8})(?!\d)", clean)
-        if candidates:
-            # Prefer a normal reference length rather than totals or one/two digit noise.
-            return candidates[0], clean
-    return "", ""
+    pieces = _easy_read(prepared, allowlist="0123456789")
+    candidates = []
+    for _, value, conf in pieces:
+        for token in re.findall(r"(?<!\d)(\d{3,8})(?!\d)", value):
+            candidates.append((token, conf))
+    candidates.sort(key=lambda row: row[1], reverse=True)
+    joined = " | ".join(value for _, value, _ in pieces)
+    return (candidates[0][0], joined) if candidates else ("", joined)
 
 
 def _read_summary_total(image, last_item_y, ocr_language):
     width, height = image.size
     start_y = int(min(height * 0.72, last_item_y + height * 0.02))
-    end_y = int(min(height * 0.78, last_item_y + height * 0.18))
-    crop = image.crop((0, start_y, int(width * 0.60), end_y))
+    end_y = int(min(height * 0.79, last_item_y + height * 0.18))
+    crop = image.crop((0, start_y, int(width * 0.62), end_y))
     prepared, _ = _prepare_ocr_image(
-        crop, target_long_side=1400, min_scale=4.0, max_scale=6.0
-    )
-    text = pytesseract.image_to_string(
-        prepared, lang=ocr_language, config="--oem 3 --psm 12"
+        crop, target_long_side=1400, min_scale=2.5, max_scale=4.5
     )
     values = []
-    for token in _extract_number_candidates(text):
-        if "." not in token:
+    for _, text, conf in _easy_read(prepared, allowlist="0123456789.,"):
+        if conf < 0.10:
             continue
-        try:
-            value = float(token)
-        except ValueError:
-            continue
-        if 0 < value < 100000:
-            values.append(value)
+        for token in _extract_number_candidates(text):
+            try:
+                value = float(token)
+            except ValueError:
+                continue
+            if 0 < value < 100000:
+                values.append(value)
     return values
 
 
 def extract_invoice_data(uploaded_file, stock_df=None):
-    """Read a Golden Palace invoice locally with Tesseract; no paid API is used."""
+    """Read a Golden Palace invoice locally with EasyOCR; no paid API is used."""
     ocr_ok, ocr_language, ocr_info = free_ocr_status()
     if not ocr_ok:
         raise RuntimeError(
             f"محرك OCR المجاني غير جاهز: {ocr_info}. "
-            "تأكد من requirements.txt و packages.txt المرفقين."
+            "تأكد من requirements.txt ولا تضف packages.txt."
         )
 
     image_bytes = uploaded_file.getvalue()
@@ -447,9 +454,8 @@ def extract_invoice_data(uploaded_file, stock_df=None):
     width, height = image.size
 
     full_prepared, _ = _prepare_ocr_image(image)
-    full_text = pytesseract.image_to_string(
-        full_prepared, lang=ocr_language, config="--oem 3 --psm 6"
-    )
+    full_results = _easy_read(full_prepared)
+    full_text = "\n".join(value for _, value, _ in full_results)
     normalized_full_text = normalize_item_name(_ocr_clean_text(full_text))
 
     out_roots = ("إخرا", "اخرا", "تسليم", "مبيعات", "بيع")
@@ -463,7 +469,6 @@ def extract_invoice_data(uploaded_file, stock_df=None):
         movement_type = "IN"
         movement_detected = True
     else:
-        # Delivery-note samples are normally OUT, but this remains editable before posting.
         movement_type = "OUT"
         movement_detected = False
 
@@ -474,40 +479,31 @@ def extract_invoice_data(uploaded_file, stock_df=None):
             if code:
                 stock_code_map[code] = str(row.get("اسم المادة", "") or "").strip()
 
-    # The item-code column is on the right side of Golden Palace invoice/delivery-note forms.
+    # Item code column on the right side of the Golden Palace form.
     code_x0, code_x1 = int(width * 0.76), width
     code_y0, code_y1 = int(height * 0.28), int(height * 0.66)
     code_crop = image.crop((code_x0, code_y0, code_x1, code_y1))
     code_prepared, code_scale = _prepare_ocr_image(
-        code_crop, target_long_side=1800, min_scale=4.0, max_scale=6.0
+        code_crop, target_long_side=1800, min_scale=3.0, max_scale=5.0
     )
-    code_data = pytesseract.image_to_data(
-        code_prepared,
-        lang="eng" if "eng" in ocr_language else ocr_language,
-        config="--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789",
-        output_type=pytesseract.Output.DICT,
-    )
+    code_results = _easy_read(code_prepared, allowlist="0123456789")
 
     detected_rows = []
-    for index, token in enumerate(code_data.get("text", [])):
+    for bbox, token, token_conf in code_results:
         digits = re.sub(r"\D", "", _ocr_clean_text(token))
-        try:
-            token_conf = float(code_data["conf"][index])
-        except Exception:
-            token_conf = -1
-        if not (4 <= len(digits) <= 12) or token_conf < 20:
+        if not (4 <= len(digits) <= 12) or token_conf < 0.15:
             continue
-        row_center_y = code_y0 + (
-            float(code_data["top"][index])
-            + float(code_data["height"][index]) / 2
-        ) / code_scale
+        try:
+            ys = [float(point[1]) for point in bbox]
+            row_center_y = code_y0 + (sum(ys) / len(ys)) / code_scale
+        except Exception:
+            continue
         detected_rows.append({
             "code": digits,
             "center_y": row_center_y,
             "ocr_conf": token_conf,
         })
 
-    # Remove duplicate detections that refer to the same physical row.
     unique_rows = []
     for row in sorted(detected_rows, key=lambda item: item["center_y"]):
         if unique_rows and abs(row["center_y"] - unique_rows[-1]["center_y"]) < height * 0.012:
@@ -600,7 +596,6 @@ def extract_invoice_data(uploaded_file, stock_df=None):
         "ocr_text": _ocr_clean_text(full_text),
         "reference_ocr_text": reference_ocr_text,
     }
-
 
 def normalize_item_name(value):
     """Normalize Ameen item names without changing the displayed Arabic text."""
@@ -1558,7 +1553,7 @@ setup_tab.__exit__(None, None, None)
 invoice_tab.__enter__()
 st.subheader("🧾 قراءة الفاتورة ومراجعتها")
 st.caption(
-    "قراءة مجانية ومحلية بـ Tesseract: لا تحتاج OpenAI API أو رصيد مدفوع. "
+    "قراءة مجانية بـ EasyOCR بدون OpenAI API وبدون packages.txt. "
     "ارفع الصورة، راجع النتيجة، ثم أدخل كلمة المرور لاعتماد الحركة."
 )
 ocr_ok, ocr_language, ocr_info = free_ocr_status()
@@ -1623,7 +1618,7 @@ for image_hash, recognized in list(st.session_state['recognized_invoices'].items
             )
         for warning in recognized.get("warnings", []):
             st.warning(str(warning))
-        st.caption(f"محرك القراءة: {recognized.get('ocr_engine', 'Tesseract المحلي')}")
+        st.caption(f"محرك القراءة: {recognized.get('ocr_engine', 'EasyOCR المجاني')}")
         with st.expander("🔧 عرض نص OCR الخام للتدقيق", expanded=False):
             st.text(recognized.get("ocr_text", ""))
 
