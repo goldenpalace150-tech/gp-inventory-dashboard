@@ -1,18 +1,20 @@
 import streamlit as st
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageOps, ImageEnhance
 import io
 import json
 import re
 import unicodedata
-import base64
 import hashlib
 import os
 import sqlite3
 import uuid
-import urllib.error
-import urllib.request
 from datetime import datetime
+
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
 
 # ==========================================
 # PAGE CONFIGURATION & MOBILE-FRIENDLY RTL STYLING
@@ -30,10 +32,13 @@ def app_secret(section, key, default=""):
 DATABASE_PATH = str(
     app_secret("inventory", "database_path", "inventory_tracker.db")
 ).strip()
-OPENAI_API_KEY = str(app_secret("openai", "api_key", "")).strip()
-OPENAI_VISION_MODEL = str(
-    app_secret("openai", "vision_model", "gpt-4.1-mini")
-).strip()
+
+# Free/local OCR. No API key or paid credits are required.
+OCR_PREFERRED_LANGUAGES = ("ara", "eng")
+OCR_ARABIC_DIGITS = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
 
 
 def database_connection():
@@ -283,106 +288,318 @@ if st.session_state['logged_in_user'] is None:
     st.stop()
 
 # ==========================================
-# REAL INVOICE PHOTO RECOGNITION
+# FREE / LOCAL INVOICE PHOTO RECOGNITION
 # ==========================================
-def extract_invoice_data(uploaded_file):
-    """Recognize the actual invoice image and return strict structured data."""
-    if not OPENAI_API_KEY:
-        raise RuntimeError(
-            "أضف openai.api_key إلى Streamlit Secrets لتفعيل قراءة صور الفواتير."
-        )
-    image = Image.open(io.BytesIO(uploaded_file.getvalue())).convert("RGB")
-    image.thumbnail((2200, 2200))
-    optimized = io.BytesIO()
-    image.save(optimized, format="JPEG", quality=90, optimize=True)
-    image_b64 = base64.b64encode(optimized.getvalue()).decode("ascii")
-
-    invoice_schema = {
-        "type": "object",
-        "properties": {
-            "invoice_number": {"type": "string"},
-            "movement_type": {"type": "string", "enum": ["OUT", "IN"]},
-            "confidence": {"type": "number"},
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "item_code": {"type": "string"},
-                        "item_name": {"type": "string"},
-                        "quantity": {"type": "number"},
-                    },
-                    "required": ["item_code", "item_name", "quantity"],
-                    "additionalProperties": False,
-                },
-            },
-            "warnings": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": [
-            "invoice_number", "movement_type", "confidence", "items", "warnings"
-        ],
-        "additionalProperties": False,
-    }
-    prompt = (
-        "اقرأ صورة فاتورة مخزون عربية أو إنجليزية بدقة. استخرج رقم الفاتورة، "
-        "وحدد OUT للمبيعات/الإخراج وIN للمشتريات/المرتجع الداخل، ثم استخرج كل "
-        "رمز مادة واسمها والكمية فقط. لا تخمن رمزاً غير ظاهر؛ اتركه فارغاً "
-        "وأضف تحذيراً. لا تجمع سطوراً مختلفة ولا تستخدم السعر ككمية."
-    )
-    payload = {
-        "model": OPENAI_VISION_MODEL,
-        "input": [{
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": prompt},
-                {
-                    "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{image_b64}",
-                    "detail": "high",
-                },
-            ],
-        }],
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "inventory_invoice",
-                "strict": True,
-                "schema": invoice_schema,
-            }
-        },
-        "max_output_tokens": 3000,
-    }
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+def free_ocr_status():
+    """Return local Tesseract availability and the installed OCR languages."""
+    if pytesseract is None:
+        return False, "", "مكتبة pytesseract غير مثبتة"
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"فشل التعرف على الفاتورة (HTTP {error.code}): {detail}")
+        version = str(pytesseract.get_tesseract_version()).splitlines()[0]
+        available = set(pytesseract.get_languages(config=""))
     except Exception as error:
-        raise RuntimeError(f"تعذر الاتصال بخدمة قراءة الفاتورة: {error}")
+        return False, "", f"Tesseract غير متاح: {error}"
 
-    output_text = ""
-    for output_item in response_data.get("output", []):
-        if output_item.get("type") != "message":
+    selected = [lang for lang in OCR_PREFERRED_LANGUAGES if lang in available]
+    if not selected:
+        return False, "", "لم يتم العثور على حزم لغات OCR العربية/الإنجليزية"
+    return True, "+".join(selected), f"Tesseract {version} ({'+'.join(selected)})"
+
+
+def _ocr_clean_text(value):
+    text = str(value or "").translate(OCR_ARABIC_DIGITS)
+    return (
+        text.replace("\u200f", "")
+        .replace("\u200e", "")
+        .replace("\ufeff", "")
+        .strip()
+    )
+
+
+def _prepare_ocr_image(image, target_long_side=2400, min_scale=2.0, max_scale=4.0):
+    """Improve contrast/shadows and upscale small phone photos for Tesseract."""
+    gray = ImageOps.grayscale(image)
+    gray = ImageOps.autocontrast(gray, cutoff=1)
+    gray = ImageEnhance.Contrast(gray).enhance(1.25)
+    longest = max(gray.size)
+    scale = max(min_scale, min(max_scale, target_long_side / max(1, longest)))
+    prepared = gray.resize(
+        (max(1, int(gray.width * scale)), max(1, int(gray.height * scale))),
+        Image.Resampling.LANCZOS,
+    )
+    return prepared, scale
+
+
+def _extract_number_candidates(text):
+    clean = _ocr_clean_text(text).replace(",", ".")
+    return re.findall(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", clean)
+
+
+def _read_quantity_crop(image, row_center_y, ocr_language):
+    """Read the quantity column for a detected item row on Golden Palace forms."""
+    width, height = image.size
+    half_height = max(20, int(height * 0.027))
+    crop = image.crop((
+        int(width * 0.22),
+        max(0, int(row_center_y - half_height)),
+        int(width * 0.36),
+        min(height, int(row_center_y + half_height)),
+    ))
+    prepared, _ = _prepare_ocr_image(
+        crop, target_long_side=900, min_scale=4.0, max_scale=6.0
+    )
+
+    all_candidates = []
+    for psm in (7, 6, 11):
+        text = pytesseract.image_to_string(
+            prepared,
+            lang="eng" if "eng" in ocr_language else ocr_language,
+            config=(
+                f"--oem 3 --psm {psm} "
+                "-c tessedit_char_whitelist=0123456789.,"
+            ),
+        )
+        for token in _extract_number_candidates(text):
+            try:
+                value = float(token)
+            except ValueError:
+                continue
+            if value > 0:
+                all_candidates.append((token, value))
+
+    # Decimals are especially reliable on this invoice template (3.00, 4.00, 2.00).
+    decimal_values = [value for token, value in all_candidates if "." in token]
+    if decimal_values:
+        rounded = [round(value, 4) for value in decimal_values]
+        return max(set(rounded), key=rounded.count)
+
+    # If no decimal survived OCR, choose the most repeated positive value.
+    if all_candidates:
+        rounded = [round(value, 4) for _, value in all_candidates]
+        return max(set(rounded), key=rounded.count)
+    return None
+
+
+def _read_invoice_reference(image, last_item_y, ocr_language):
+    """Read the reference/invoice number from the summary block below the item table."""
+    width, height = image.size
+    start_y = int(min(height * 0.72, last_item_y + height * 0.025))
+    end_y = int(min(height * 0.78, last_item_y + height * 0.18))
+    if end_y <= start_y:
+        start_y, end_y = int(height * 0.45), int(height * 0.72)
+
+    # On the Golden Palace delivery note the invoice/reference number is in the left half.
+    crop = image.crop((0, start_y, int(width * 0.58), end_y))
+    prepared, _ = _prepare_ocr_image(
+        crop, target_long_side=1400, min_scale=4.0, max_scale=6.0
+    )
+    for psm in (12, 11, 6):
+        text = pytesseract.image_to_string(
+            prepared,
+            lang=ocr_language,
+            config=f"--oem 3 --psm {psm}",
+        )
+        clean = _ocr_clean_text(text)
+        candidates = re.findall(r"(?<!\d)(\d{3,8})(?!\d)", clean)
+        if candidates:
+            # Prefer a normal reference length rather than totals or one/two digit noise.
+            return candidates[0], clean
+    return "", ""
+
+
+def _read_summary_total(image, last_item_y, ocr_language):
+    width, height = image.size
+    start_y = int(min(height * 0.72, last_item_y + height * 0.02))
+    end_y = int(min(height * 0.78, last_item_y + height * 0.18))
+    crop = image.crop((0, start_y, int(width * 0.60), end_y))
+    prepared, _ = _prepare_ocr_image(
+        crop, target_long_side=1400, min_scale=4.0, max_scale=6.0
+    )
+    text = pytesseract.image_to_string(
+        prepared, lang=ocr_language, config="--oem 3 --psm 12"
+    )
+    values = []
+    for token in _extract_number_candidates(text):
+        if "." not in token:
             continue
-        for content_item in output_item.get("content", []):
-            if content_item.get("type") == "output_text":
-                output_text += content_item.get("text", "")
-    if not output_text:
-        raise RuntimeError("لم تُرجع خدمة التعرف بيانات قابلة للقراءة.")
-    recognized = json.loads(output_text)
-    recognized["image_hash"] = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
-    recognized["source_name"] = getattr(uploaded_file, "name", "invoice-photo.jpg")
-    return recognized
+        try:
+            value = float(token)
+        except ValueError:
+            continue
+        if 0 < value < 100000:
+            values.append(value)
+    return values
+
+
+def extract_invoice_data(uploaded_file, stock_df=None):
+    """Read a Golden Palace invoice locally with Tesseract; no paid API is used."""
+    ocr_ok, ocr_language, ocr_info = free_ocr_status()
+    if not ocr_ok:
+        raise RuntimeError(
+            f"محرك OCR المجاني غير جاهز: {ocr_info}. "
+            "تأكد من requirements.txt و packages.txt المرفقين."
+        )
+
+    image_bytes = uploaded_file.getvalue()
+    image = ImageOps.exif_transpose(
+        Image.open(io.BytesIO(image_bytes))
+    ).convert("RGB")
+    width, height = image.size
+
+    full_prepared, _ = _prepare_ocr_image(image)
+    full_text = pytesseract.image_to_string(
+        full_prepared, lang=ocr_language, config="--oem 3 --psm 6"
+    )
+    normalized_full_text = normalize_item_name(_ocr_clean_text(full_text))
+
+    out_roots = ("إخرا", "اخرا", "تسليم", "مبيعات", "بيع")
+    in_roots = ("إدخال", "ادخال", "شراء", "مرتجع", "استلام مواد")
+    detected_out = any(root in normalized_full_text for root in out_roots)
+    detected_in = any(root in normalized_full_text for root in in_roots)
+    if detected_out and not detected_in:
+        movement_type = "OUT"
+        movement_detected = True
+    elif detected_in and not detected_out:
+        movement_type = "IN"
+        movement_detected = True
+    else:
+        # Delivery-note samples are normally OUT, but this remains editable before posting.
+        movement_type = "OUT"
+        movement_detected = False
+
+    stock_code_map = {}
+    if stock_df is not None and not stock_df.empty:
+        for _, row in stock_df.iterrows():
+            code = normalize_item_code(row.get("رمز المادة", ""))
+            if code:
+                stock_code_map[code] = str(row.get("اسم المادة", "") or "").strip()
+
+    # The item-code column is on the right side of Golden Palace invoice/delivery-note forms.
+    code_x0, code_x1 = int(width * 0.76), width
+    code_y0, code_y1 = int(height * 0.28), int(height * 0.66)
+    code_crop = image.crop((code_x0, code_y0, code_x1, code_y1))
+    code_prepared, code_scale = _prepare_ocr_image(
+        code_crop, target_long_side=1800, min_scale=4.0, max_scale=6.0
+    )
+    code_data = pytesseract.image_to_data(
+        code_prepared,
+        lang="eng" if "eng" in ocr_language else ocr_language,
+        config="--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789",
+        output_type=pytesseract.Output.DICT,
+    )
+
+    detected_rows = []
+    for index, token in enumerate(code_data.get("text", [])):
+        digits = re.sub(r"\D", "", _ocr_clean_text(token))
+        try:
+            token_conf = float(code_data["conf"][index])
+        except Exception:
+            token_conf = -1
+        if not (4 <= len(digits) <= 12) or token_conf < 20:
+            continue
+        row_center_y = code_y0 + (
+            float(code_data["top"][index])
+            + float(code_data["height"][index]) / 2
+        ) / code_scale
+        detected_rows.append({
+            "code": digits,
+            "center_y": row_center_y,
+            "ocr_conf": token_conf,
+        })
+
+    # Remove duplicate detections that refer to the same physical row.
+    unique_rows = []
+    for row in sorted(detected_rows, key=lambda item: item["center_y"]):
+        if unique_rows and abs(row["center_y"] - unique_rows[-1]["center_y"]) < height * 0.012:
+            if row["ocr_conf"] > unique_rows[-1]["ocr_conf"]:
+                unique_rows[-1] = row
+            continue
+        unique_rows.append(row)
+
+    warnings = []
+    items = []
+    matched_stock_count = 0
+    quantity_count = 0
+    for row in unique_rows:
+        code = normalize_item_code(row["code"])
+        quantity = _read_quantity_crop(image, row["center_y"], ocr_language)
+        item_name = stock_code_map.get(code, "")
+        if item_name:
+            matched_stock_count += 1
+        elif stock_code_map:
+            warnings.append(
+                f"الرمز {code} قُرئ من الصورة لكنه غير موجود تماماً في المخزون الحالي؛ راجعه يدوياً."
+            )
+        if quantity is not None:
+            quantity_count += 1
+        else:
+            warnings.append(f"تعذر تثبيت كمية الرمز {code}؛ أدخل الكمية يدوياً قبل الاعتماد.")
+        items.append({
+            "item_code": code,
+            "item_name": item_name,
+            "quantity": quantity,
+        })
+
+    if not items:
+        warnings.append(
+            "لم يلتقط OCR أي رمز مادة موثوق من العمود الأيمن. جرّب صورة أقرب وأكثر استقامة."
+        )
+
+    last_item_y = max((row["center_y"] for row in unique_rows), default=height * 0.48)
+    invoice_number, reference_ocr_text = _read_invoice_reference(
+        image, last_item_y, ocr_language
+    )
+    if not invoice_number:
+        warnings.append("لم يتم تثبيت رقم الفاتورة/المرجع؛ اكتبه يدوياً قبل الاعتماد.")
+
+    if not movement_detected:
+        warnings.append(
+            "نوع الحركة لم يُحسم من النص؛ تم اختيار OUT مؤقتاً. راجع خيار إدخال/إخراج قبل الاعتماد."
+        )
+
+    total_candidates = _read_summary_total(image, last_item_y, ocr_language)
+    item_total = sum(
+        float(item["quantity"])
+        for item in items
+        if item.get("quantity") is not None
+    )
+    total_match = False
+    if items and quantity_count == len(items) and total_candidates:
+        total_match = any(abs(value - item_total) < 0.001 for value in total_candidates)
+        if not total_match:
+            warnings.append(
+                f"مجموع السطور المقروءة ({item_total:g}) لا يطابق بوضوح مجموع الكميات في أسفل المستند؛ راجع السطور."
+            )
+
+    row_count = max(1, len(items))
+    quantity_ratio = quantity_count / row_count if items else 0
+    if stock_code_map and items:
+        stock_ratio = matched_stock_count / row_count
+    elif items:
+        stock_ratio = 0.5
+    else:
+        stock_ratio = 0
+
+    confidence = 0.15 if items else 0
+    confidence += 0.35 * quantity_ratio
+    confidence += 0.20 * stock_ratio
+    confidence += 0.15 if invoice_number else 0
+    confidence += 0.10 if movement_detected else 0
+    confidence += 0.05 if total_match else 0
+    confidence = max(0.0, min(1.0, confidence))
+
+    return {
+        "invoice_number": invoice_number,
+        "movement_type": movement_type,
+        "confidence": confidence,
+        "items": items,
+        "warnings": warnings,
+        "image_hash": hashlib.sha256(image_bytes).hexdigest(),
+        "source_name": getattr(uploaded_file, "name", "invoice-photo.jpg"),
+        "ocr_engine": ocr_info,
+        "ocr_text": _ocr_clean_text(full_text),
+        "reference_ocr_text": reference_ocr_text,
+    }
 
 
 def normalize_item_name(value):
@@ -1340,7 +1557,15 @@ with col3:
 setup_tab.__exit__(None, None, None)
 invoice_tab.__enter__()
 st.subheader("🧾 قراءة الفاتورة ومراجعتها")
-st.caption("ارفع الصورة، راجع النتيجة، ثم أدخل كلمة المرور لاعتماد الحركة.")
+st.caption(
+    "قراءة مجانية ومحلية بـ Tesseract: لا تحتاج OpenAI API أو رصيد مدفوع. "
+    "ارفع الصورة، راجع النتيجة، ثم أدخل كلمة المرور لاعتماد الحركة."
+)
+ocr_ok, ocr_language, ocr_info = free_ocr_status()
+if ocr_ok:
+    st.success(f"✅ OCR مجاني جاهز: {ocr_info}")
+else:
+    st.error(f"❌ OCR المجاني غير جاهز: {ocr_info}")
 uploaded_invoices = st.file_uploader(
     "رفع صور الفواتير",
     type=["png", "jpg", "jpeg"],
@@ -1368,25 +1593,22 @@ if invoice_flash:
     st.success(invoice_flash)
 
 if active_invoices_list:
-    if not OPENAI_API_KEY:
-        st.error(
-            "قراءة الفاتورة الحقيقية غير مفعلة. أضف مفتاح OpenAI في Secrets؛ "
-            "لن يغيّر التطبيق المخزون اعتماداً على بيانات تجريبية."
-        )
     if st.button(
-        "🔎 قراءة صور الفواتير",
+        "🔎 قراءة صور الفواتير مجاناً",
         type="primary",
         use_container_width=True,
-        disabled=not OPENAI_API_KEY,
+        disabled=not ocr_ok,
     ):
         for invoice_file in active_invoices_list:
             image_hash = hashlib.sha256(invoice_file.getvalue()).hexdigest()
             if image_hash in st.session_state['recognized_invoices']:
                 continue
-            with st.spinner(f"جاري قراءة {invoice_file.name}..."):
+            with st.spinner(f"جاري قراءة {invoice_file.name} محلياً..."):
                 try:
                     st.session_state['recognized_invoices'][image_hash] = (
-                        extract_invoice_data(invoice_file)
+                        extract_invoice_data(
+                            invoice_file, st.session_state.get('live_stock')
+                        )
                     )
                 except Exception as recognition_error:
                     st.error(f"{invoice_file.name}: {recognition_error}")
@@ -1401,6 +1623,9 @@ for image_hash, recognized in list(st.session_state['recognized_invoices'].items
             )
         for warning in recognized.get("warnings", []):
             st.warning(str(warning))
+        st.caption(f"محرك القراءة: {recognized.get('ocr_engine', 'Tesseract المحلي')}")
+        with st.expander("🔧 عرض نص OCR الخام للتدقيق", expanded=False):
+            st.text(recognized.get("ocr_text", ""))
 
         raw_items = pd.DataFrame(recognized.get("items", []))
         if raw_items.empty:
