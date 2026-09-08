@@ -4,3 +4,4 @@ Pillow
 openpyxl
 xlrd
 easyocr==1.7.2
+numpy<2.0
