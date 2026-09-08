@@ -21,13 +21,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from gp_core import (
     COL_CODE,COL_NAME,COL_QTY,COL_KEY,COL_MATCH,COL_DATE,
-    read_stock_report,read_movement_report,enrich_stock_codes,build_inventory_analysis,
+    read_stock_report,read_movement_report,build_inventory_analysis,
 )
 from gp_store import Store, AppError, clean_json, utcnow, aware
 from gp_ui import (BUILD, ROOT, t, css, brand_html, status_html, kpis_html, section_html,
                    set_language, loading_html, language_marker)
 from gp_ocr import free_ocr_status, extract_invoice_data
-from gp_invoice import match_invoice_lines
+from gp_invoice import match_invoice_lines, canonicalize_invoice_rows
 from gp_reports import visible_frame, excel_bytes, day_report_sheets
 
 st.set_page_config(page_title="Golden Palace | Inventory",
@@ -151,6 +151,7 @@ def stock_page(store,token,state,stock):
 def invoices_page(store,token,state,stock):
     section("Invoices","OCR hint")
     ok,_,detail=free_ocr_status()
+    code_master_ready = (not stock.empty and stock[COL_CODE].fillna("").astype(str).str.strip().ne("").all())
     with st.container(border=True):
         left,right=st.columns([1.6,1])
         with left:
@@ -159,9 +160,10 @@ def invoices_page(store,token,state,stock):
                 capture=st.camera_input(t("Invoice image"),key="camera_capture")
                 if capture:uploaded=capture
             a,b=st.columns(2)
-            read=a.button(t("Read invoice"),type="primary",disabled=not (uploaded and ok),width="stretch")
+            read=a.button(t("Read invoice"),type="primary",disabled=not (uploaded and ok and code_master_ready),width="stretch")
             manual=b.button(t("Manual invoice"),width="stretch")
             if not ok:st.info("OCR is unavailable on this host. Manual invoice entry remains available.")
+            if not code_master_ready:st.warning(t("Warehouse code master required"))
             if manual:
                 st.session_state["selected_draft_id"]=store.create_draft(token,source_name=t("Manual invoice"))
                 st.rerun()
@@ -209,7 +211,14 @@ def invoices_page(store,token,state,stock):
     suffix=selected+"_"+str(draft["version"])
     for message in payload.get("warnings",[])[:6]:st.warning(str(message))
     st.caption(t("Draft hint"))
-    rows=payload.get("items") or [{"item_code":"","item_name":"","quantity":None}]
+    rows=payload.get("items") or []
+    try:
+        rows, ignored_saved = canonicalize_invoice_rows(rows, stock, drop_unknown=True)
+    except AppError:
+        rows, ignored_saved = [], []
+    if ignored_saved:
+        st.warning(t("Ignored non-item numbers")+": "+", ".join(ignored_saved[:8]))
+    rows=rows or [{"item_code":"","item_name":"","quantity":None}]
     frame=pd.DataFrame(rows)[["item_code","item_name","quantity"]]
     frame["item_code"]=frame["item_code"].fillna("").astype(str)
     frame["item_name"]=frame["item_name"].fillna("").astype(str)
@@ -220,7 +229,7 @@ def invoices_page(store,token,state,stock):
         kinds=["","OUT","IN"]
         kind=b.selectbox(t("Movement type"),kinds,index=kinds.index(payload.get("movement_type","")) if payload.get("movement_type","") in kinds else 0,
                          format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
-        edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,
+        edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,disabled=["item_name"],
             column_config={"item_code":st.column_config.TextColumn(COL_CODE),"item_name":st.column_config.TextColumn(COL_NAME),
                            "quantity":st.column_config.NumberColumn(COL_QTY,min_value=0,format="%.4f")})
         review_checked=st.checkbox(t("Confirm review"),key="checked_"+suffix)
@@ -230,9 +239,10 @@ def invoices_page(store,token,state,stock):
         post=b.form_submit_button(t("Post invoice"),type="primary",width="stretch")
         if save or post:
             try:
+                canonical_rows, _ = canonicalize_invoice_rows(edited.to_dict("records"), stock, drop_unknown=False)
                 updated=dict(payload)
                 updated.update(invoice_number=reference.strip(),movement_type=kind,
-                               items=clean_json(edited.to_dict("records")))
+                               items=clean_json(canonical_rows))
                 if save:
                     store.save_draft(token,selected,updated,draft["version"])
                     success()
@@ -297,7 +307,7 @@ def analysis_page(store,token,state,stock):
     st.markdown(kpis_html([("Critical",len(critical),"Items"),("Reorder",len(reorders),"Items"),("Fast",len(fast),"Items"),("Clearance",len(slow),"Items")]),unsafe_allow_html=True)
     selected=st.segmented_control(t("Analysis"),["Reorder","Fast","Clearance","All"],default="Reorder",format_func=t,key="analysis_filter") or "Reorder"
     selected_data={"Reorder":reorders,"Fast":fast,"Clearance":slow,"All":data}[selected]
-    columns=[COL_CODE,COL_NAME,COL_QTY,priority,"\u062a\u063a\u0637\u064a\u0629 \u0627\u0644\u0645\u062e\u0632\u0648\u0646 \u0628\u0627\u0644\u0623\u064a\u0627\u0645",
+    columns=[COL_CODE,COL_NAME,COL_QTY,priority,"تغطية المستودع بالأيام",
              "\u0643\u0645\u064a\u0629 \u0627\u0644\u0637\u0644\u0628 \u0627\u0644\u0645\u0642\u062a\u0631\u062d\u0629","\u0627\u062a\u062c\u0627\u0647 \u0627\u0644\u0637\u0644\u0628","\u0633\u0628\u0628 \u0627\u0644\u0642\u0631\u0627\u0631"]
     table(selected_data[columns],height=460)
     with st.expander(t("Analysis")):
@@ -344,9 +354,7 @@ def imports_panel(store,token,state,stock):
                 raw=uploaded.getvalue()
                 with branded_wait("Reading report"):
                     df=parse_stock_report(raw)
-                # Existing history can fill codes but never determines opening quantities.
-                history=store.movement_history(token)
-                if not history.empty:df=enrich_stock_codes(df,history)
+                # The warehouse report is now the master source for both item code and item name.
                 table(visible_frame(df.head(12)))
                 st.caption(f"{len(df):,} "+t("Items"))
                 with st.form("stock_import"):

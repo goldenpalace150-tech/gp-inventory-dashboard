@@ -11,10 +11,11 @@ import os
 import threading
 
 from gp_core import normalize_item_code
+from gp_invoice import canonicalize_invoice_rows
 
-OCR_BUILD = "GP-OCR-ONNX-LITE-v5"
+OCR_BUILD = "GP-OCR-WAREHOUSE-v9"
 OCR_TIMEOUT_SECONDS = 90
-OCR_MAX_WORKER_MB = 480
+OCR_MAX_WORKER_MB = 360
 OCR_MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 _SCAN_LOCK = threading.Lock()
 
@@ -202,9 +203,11 @@ def _run_ocr_worker(image_bytes, worker_path=None, timeout=None, max_worker_mb=N
 
 
 def extract_invoice_data(uploaded_file, stock_df=None):
-    """Read through the isolated worker and match product names in the parent."""
+    """OCR numeric fields, then keep only codes present in the warehouse master."""
     import math
 
+    if stock_df is None or stock_df.empty:
+        raise RuntimeError("Upload the current warehouse report with item codes before reading invoices.")
     image_bytes = uploaded_file.getvalue()
     lock = _ocr_scan_lock()
     if not lock.acquire(blocking=False):
@@ -214,37 +217,40 @@ def extract_invoice_data(uploaded_file, stock_df=None):
     finally:
         lock.release()
 
-    if len(result["items"]) > 60:
+    if len(result.get("items", [])) > 60:
         raise RuntimeError("Too many OCR rows; use manual entry.")
     result.setdefault("warnings", [])
+    canonical, ignored = canonicalize_invoice_rows(result.get("items", []), stock_df, drop_unknown=True)
+    result["items"] = canonical
+    if ignored:
+        result["warnings"].append(
+            "Ignored OCR numbers that are not item codes in the current warehouse report: " + ", ".join(ignored[:8])
+        )
+    if not canonical:
+        result["warnings"].append("No warehouse item codes were confirmed from the image. Add the rows manually.")
 
-    code_names = {}
-    if stock_df is not None:
-        for _, row in stock_df.iterrows():
-            code = normalize_item_code(row.get("رمز المادة", ""))
-            name = str(row.get("اسم المادة", "") or "")
-            if code:
-                code_names.setdefault(code, set()).add(name)
-
-    for item in result["items"]:
-        if not isinstance(item, dict):
-            raise RuntimeError("Invalid OCR row.")
-        code = normalize_item_code(item.get("item_code", ""))
-        item["item_code"] = code
-        names = code_names.get(code, set())
-        item["item_name"] = next(iter(names)) if len(names) == 1 else ""
-        if not item["item_name"]:
-            result["warnings"].append(f"Code {code or '?'}: no unique exact stock name; review manually.")
-
+    quantities = []
+    for item in canonical:
         quantity = item.get("quantity")
-        if quantity is not None:
-            try:
-                value = float(quantity)
-            except (ValueError, TypeError) as error:
-                raise RuntimeError("Invalid OCR quantity.") from error
-            if not math.isfinite(value) or value <= 0:
-                raise RuntimeError("Invalid OCR quantity.")
-            item["quantity"] = value
+        if quantity is None:
+            continue
+        try:
+            value = float(quantity)
+        except (ValueError, TypeError) as error:
+            raise RuntimeError("Invalid OCR quantity.") from error
+        if not math.isfinite(value) or value <= 0:
+            raise RuntimeError("Invalid OCR quantity.")
+        item["quantity"] = value
+        quantities.append(value)
+
+    printed_total = result.get("printed_total_candidate")
+    if printed_total is not None and len(quantities) == len(canonical) and canonical:
+        try:
+            printed_total = float(printed_total)
+            if not math.isclose(sum(quantities), printed_total, abs_tol=0.001):
+                result["warnings"].append("Verified warehouse rows do not match the printed quantity total; review quantities.")
+        except (TypeError, ValueError):
+            pass
 
     result["image_hash"] = hashlib.sha256(image_bytes).hexdigest()
     result["source_name"] = getattr(uploaded_file, "name", "invoice-photo.jpg")

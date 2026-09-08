@@ -29,7 +29,7 @@ from sqlalchemy.pool import StaticPool
 from gp_core import (
     COL_CODE, COL_NAME, COL_QTY, COL_KEY, COL_MATCH, COL_DATE, COL_REF,
     COL_IN, COL_OUT, COL_BAL, COL_USER, COL_CUSTOMER, COL_NOTE,
-    normalize_item_name, normalize_item_code, ensure_unique_stock_keys,
+    normalize_item_name, normalize_item_code, item_link_key, ensure_unique_stock_keys,
 )
 
 SCHEMA_VERSION = 5
@@ -426,7 +426,7 @@ class Store:
             if not name or not key or len(code)>160:
                 raise AppError("Invalid stock row")
             rows.append(dict(item_key=key,item_code=code,item_name=name,quantity=decimal_qty(r[COL_QTY],normalize=True),
-                match_key=normalize_item_name(name),updated_at=utcnow()))
+                match_key=item_link_key(code,name),updated_at=utcnow()))
         if len({r["item_key"] for r in rows})!=len(rows):
             raise AppError("Duplicate stock keys")
         data=[{k:v for k,v in r.items() if k!="updated_at"} for r in rows]
@@ -504,7 +504,7 @@ class Store:
             result.append({COL_CODE:r["item_code"],COL_NAME:r["item_name"],COL_DATE:aware(r["created_at"]).astimezone(self.tz).replace(tzinfo=None),
                 COL_REF:r["invoice_reference"],COL_CUSTOMER:"",COL_IN:float(r["quantity"]) if r["movement_type"]=="IN" else 0,
                 COL_OUT:float(r["quantity"]) if r["movement_type"]=="OUT" else 0,COL_BAL:float(r["quantity_after"]),
-                COL_USER:r["username"],COL_NOTE:r["reason"],COL_MATCH:normalize_item_name(r["item_name"])})
+                COL_USER:r["username"],COL_NOTE:r["reason"],COL_MATCH:item_link_key(r["item_code"],r["item_name"])})
         return pd.DataFrame(result)
 
     def post(self, token, password, changes, request_key, *, source="MANUAL", reference="", image_hash=None,

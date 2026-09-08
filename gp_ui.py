@@ -150,7 +150,7 @@ def section_html(title,note=""):
     return f'<div class="gp-section" dir="rtl"><h2>{html.escape(t(title))}</h2><p>{html.escape(t(note))}</p></div>'
 
 # ---- v6 bilingual / branded waiting helpers ----
-BUILD = "GP-CLOUD-v6"
+BUILD = "GP-CLOUD-v9"
 LANGUAGE = "ar"
 AR.update({
     "Language": "اللغة", "Arabic": "العربية", "English": "English",
@@ -224,3 +224,17 @@ def loading_html(message="Loading"):
       <img src="data:image/png;base64,{_icon_data()}" alt="Golden Palace">
       <div class="gp-loading-ring"></div><strong>{html.escape(t(message))}</strong>
     </div></div>'''
+
+# ---- v9 warehouse terminology and code-master guidance ----
+AR.update({
+    "Inventory": "إدارة المستودعات",
+    "Stock": "المستودع",
+    "store": "أمين مستودع",
+    "Upload stock": "رفع جرد المستودع",
+    "No stock": "لا توجد بيانات للمستودع. ارفع تقرير جرد المستودع من الإعدادات.",
+    "Draft hint": "المسودة لا تغيّر رصيد المستودع. احفظ تعديلاتك قبل الخروج.",
+    "OCR hint": "تُقرأ الرموز والكميات فقط، ثم يُربط كل رمز حصراً باسمه من تقرير المستودع قبل الاعتماد.",
+    "Warehouse code master required": "ارفع تقرير جرد المستودع الذي يحتوي رمز المادة واسم المادة قبل قراءة الفواتير.",
+    "Ignored non-item numbers": "تم تجاهل أرقام ليست رموز مواد في المستودع",
+    "Importing stock": "جاري اعتماد رصيد المستودع...",
+})

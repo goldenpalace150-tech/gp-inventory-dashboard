@@ -19,6 +19,14 @@ def normalize_item_code(value):
     text = str(value).strip()
     return text[:-2] if text.endswith('.0') else text
 
+def item_link_key(code, name):
+    """Stable item link: code first, normalized name only for legacy movement rows."""
+    normalized_code = normalize_item_code(code)
+    if normalized_code:
+        return f"CODE:{normalized_code}"
+    return f"NAME:{normalize_item_name(name)}"
+
+
 def split_movement_item(value):
     """Split codes such as SG05LP3-EU-SM2-اسم المادة safely."""
     text = str(value or '').strip()
@@ -28,7 +36,7 @@ def split_movement_item(value):
     return ('', text)
 
 def read_stock_report(file_bytes):
-    """Read both the original 2-column report and older code/name/qty reports."""
+    """Read the current warehouse report. Item code is mandatory and canonical."""
     excel = pd.ExcelFile(io.BytesIO(file_bytes))
     for sheet_name in excel.sheet_names:
         for header_row in (0, 1, 2):
@@ -37,17 +45,29 @@ def read_stock_report(file_bytes):
             name_col = next((columns[key] for key in columns if 'اسم المادة' in key), None)
             qty_col = next((columns[key] for key in columns if key == 'الكمية'), None)
             code_col = next((columns[key] for key in columns if 'رمز المادة' in key), None)
-            if name_col is None or qty_col is None:
+            if name_col is None or qty_col is None or code_col is None:
                 continue
-            result = pd.DataFrame({'رمز المادة': candidate[code_col].map(normalize_item_code) if code_col is not None else '', 'اسم المادة': candidate[name_col].astype(str).str.strip('"'), 'الكمية': pd.to_numeric(candidate[qty_col], errors='coerce').fillna(0)})
-            result = result[candidate[name_col].notna() & result['اسم المادة'].astype(str).str.strip().ne('')].copy()
-            result['مفتاح المطابقة'] = result['اسم المادة'].map(normalize_item_name)
-            result = result.reset_index(drop=True)
-            base_keys = result.apply(lambda row: f"CODE:{normalize_item_code(row['رمز المادة'])}" if normalize_item_code(row['رمز المادة']) else f"NAME:{row['مفتاح المطابقة']}", axis=1)
-            duplicate_number = base_keys.groupby(base_keys).cumcount()
-            result['مفتاح المخزون'] = [base_key if number == 0 else f'{base_key}#{number + 1}' for base_key, number in zip(base_keys, duplicate_number)]
-            return result
-    raise ValueError('لم يتم العثور على أعمدة اسم المادة والكمية في تقرير الجرد.')
+            result = pd.DataFrame({
+                'رمز المادة': candidate[code_col].map(normalize_item_code),
+                'اسم المادة': candidate[name_col].where(candidate[name_col].notna(), '').astype(str).str.strip().str.strip('"'),
+                'الكمية': pd.to_numeric(candidate[qty_col], errors='coerce').fillna(0),
+            })
+            # Ignore completely blank/footer rows, but never accept half-linked item rows.
+            result = result[(result['رمز المادة'].ne('')) | (result['اسم المادة'].ne(''))].copy()
+            if result.empty:
+                raise ValueError('تقرير جرد المستودع لا يحتوي على أصناف.')
+            missing_code = result['رمز المادة'].eq('')
+            missing_name = result['اسم المادة'].eq('')
+            if missing_code.any() or missing_name.any():
+                raise ValueError('كل صنف في تقرير المستودع يجب أن يحتوي على رمز المادة واسم المادة.')
+            duplicates = result.loc[result['رمز المادة'].duplicated(keep=False), 'رمز المادة'].drop_duplicates().tolist()
+            if duplicates:
+                preview = ', '.join(duplicates[:5])
+                raise ValueError(f'رمز المادة يجب أن يكون فريداً في تقرير المستودع. رموز مكررة: {preview}')
+            result['مفتاح المطابقة'] = result.apply(lambda row: item_link_key(row['رمز المادة'], row['اسم المادة']), axis=1)
+            result['مفتاح المخزون'] = result['رمز المادة'].map(lambda code: f'CODE:{code}')
+            return result.reset_index(drop=True)
+    raise ValueError('لم يتم العثور على أعمدة رمز المادة واسم المادة والكمية في تقرير جرد المستودع.')
 
 def read_movement_report(file_bytes):
     """Read the Ameen item-movement report by its stable column positions."""
@@ -59,7 +79,7 @@ def read_movement_report(file_bytes):
     parsed_items = raw.iloc[:, 0].map(split_movement_item)
     movement = pd.DataFrame({'رمز المادة': parsed_items.map(lambda item: item[0]), 'اسم المادة': parsed_items.map(lambda item: item[1]), 'التاريخ': pd.to_datetime(raw.iloc[:, 1], errors='coerce'), 'المرجع': raw.iloc[:, 2].fillna('').astype(str).str.strip(), 'الزبون': raw.iloc[:, 3].fillna('').astype(str).str.strip(), 'إدخال': pd.to_numeric(raw.iloc[:, 4], errors='coerce').fillna(0), 'إخراج': pd.to_numeric(raw.iloc[:, 6], errors='coerce').fillna(0), 'الرصيد': pd.to_numeric(raw.iloc[:, 8], errors='coerce'), 'المستخدم': raw.iloc[:, 10].fillna('').astype(str).str.strip() if raw.shape[1] > 10 else '', 'بيان': raw.iloc[:, 13].fillna('').astype(str).str.strip() if raw.shape[1] > 13 else ''})
     movement = movement[movement['التاريخ'].notna()].copy()
-    movement['مفتاح المطابقة'] = movement['اسم المادة'].map(normalize_item_name)
+    movement['مفتاح المطابقة'] = movement.apply(lambda row: item_link_key(row['رمز المادة'], row['اسم المادة']), axis=1)
     return movement.reset_index(drop=True)
 
 def enrich_stock_codes(stock_df, movement_df):
@@ -78,6 +98,9 @@ def build_inventory_analysis(stock_df, movement_df, lead_days, safety_days, slow
     if movement_df is None or movement_df.empty:
         return pd.DataFrame()
     movement_df = movement_df.copy()
+    stock_df = stock_df.copy()
+    movement_df['مفتاح المطابقة'] = movement_df.apply(lambda row: item_link_key(row.get('رمز المادة', ''), row.get('اسم المادة', '')), axis=1)
+    stock_df['مفتاح المطابقة'] = stock_df.apply(lambda row: item_link_key(row.get('رمز المادة', ''), row.get('اسم المادة', '')), axis=1)
     movement_df['التاريخ'] = pd.to_datetime(movement_df['التاريخ'], errors='coerce')
     movement_df = movement_df[movement_df['التاريخ'].notna()].copy()
     end_date = movement_df['التاريخ'].max().normalize()
@@ -146,12 +169,12 @@ def build_inventory_analysis(stock_df, movement_df, lead_days, safety_days, slow
     analysis.loc[analysis['إجمالي الإخراج'] <= 0, 'سرعة الحركة'] = 'بدون حركة'
     analysis['أيام منذ آخر خروج'] = (end_date.normalize() - pd.to_datetime(analysis['آخر إخراج'])).dt.days
     analysis['أيام منذ آخر شراء/توريد'] = (end_date - pd.to_datetime(analysis['آخر شراء/توريد'])).dt.days
-    analysis['تغطية المخزون بالأيام'] = (analysis['الكمية'] / recent_rate.replace(0, float('nan'))).clip(lower=0).astype(float).round(1)
-    analysis['مخزون الأمان'] = (recent_rate * safety_days).round().astype(int)
-    analysis['حد إعادة الطلب'] = (recent_rate * lead_days + analysis['مخزون الأمان']).round().astype(int)
+    analysis['تغطية المستودع بالأيام'] = (analysis['الكمية'] / recent_rate.replace(0, float('nan'))).clip(lower=0).astype(float).round(1)
+    analysis['رصيد الأمان'] = (recent_rate * safety_days).round().astype(int)
+    analysis['حد إعادة الطلب'] = (recent_rate * lead_days + analysis['رصيد الأمان']).round().astype(int)
     target_days = lead_days + safety_days + review_days
     analysis['كمية الطلب المقترحة'] = (recent_rate * target_days - analysis['الكمية']).clip(lower=0).round().astype(int)
-    cover = analysis['تغطية المخزون بالأيام']
+    cover = analysis['تغطية المستودع بالأيام']
     has_recent_demand = analysis[recent_column] > 0
     critical = has_recent_demand & ((analysis['الكمية'] <= 0) | (cover <= lead_days))
     high = has_recent_demand & ~critical & ((analysis['الكمية'] <= analysis['حد إعادة الطلب']) | (cover <= lead_days + safety_days))
@@ -169,7 +192,7 @@ def build_inventory_analysis(stock_df, movement_df, lead_days, safety_days, slow
             if row[recent_column] <= 0:
                 return 'لا يوجد طلب حديث؛ راجع التصريف بدلاً من الشراء'
             return 'الرصيد يغطي مدة التوريد والأمان والمراجعة'
-        cover_text = f"تغطية {row['تغطية المخزون بالأيام']:.0f} يوم" if pd.notna(row['تغطية المخزون بالأيام']) else 'لا توجد تغطية'
+        cover_text = f"تغطية {row['تغطية المستودع بالأيام']:.0f} يوم" if pd.notna(row['تغطية المستودع بالأيام']) else 'لا توجد تغطية'
         purchase_text = f"آخر توريد منذ {int(row['أيام منذ آخر شراء/توريد'])} يوم" if pd.notna(row['أيام منذ آخر شراء/توريد']) else 'لا يوجد شراء/توريد مطابق للمرجع المحدد'
         return f"{cover_text}؛ الطلب {row['اتجاه الطلب']}؛ {purchase_text}"
     analysis['سبب القرار'] = analysis.apply(decision_reason, axis=1)
@@ -189,15 +212,19 @@ def stock_item_key(row):
     return f'CODE:{code}' if code else f"NAME:{normalize_item_name(row.get('اسم المادة', ''))}"
 
 def ensure_unique_stock_keys(stock_df):
-    if 'مفتاح المطابقة' not in stock_df.columns:
-        stock_df['مفتاح المطابقة'] = stock_df['اسم المادة'].map(normalize_item_name)
-    existing = stock_df.get('مفتاح المخزون')
-    if existing is not None and existing.notna().all() and existing.is_unique:
-        return stock_df
-    base_keys = stock_df.apply(lambda row: f"CODE:{normalize_item_code(row.get('رمز المادة', ''))}" if normalize_item_code(row.get('رمز المادة', '')) else f"NAME:{normalize_item_name(row.get('اسم المادة', ''))}", axis=1)
-    duplicate_number = base_keys.groupby(base_keys).cumcount()
-    stock_df['مفتاح المخزون'] = [base_key if number == 0 else f'{base_key}#{number + 1}' for base_key, number in zip(base_keys, duplicate_number)]
+    stock_df = stock_df.copy()
+    if 'رمز المادة' not in stock_df.columns or 'اسم المادة' not in stock_df.columns:
+        raise ValueError('تقرير المستودع يجب أن يحتوي على رمز المادة واسم المادة.')
+    stock_df['رمز المادة'] = stock_df['رمز المادة'].map(normalize_item_code)
+    if stock_df['رمز المادة'].eq('').any():
+        raise ValueError('كل صنف في المستودع يجب أن يحتوي على رمز مادة.')
+    duplicates = stock_df.loc[stock_df['رمز المادة'].duplicated(keep=False), 'رمز المادة'].drop_duplicates().tolist()
+    if duplicates:
+        raise ValueError('رمز المادة مكرر في المستودع: ' + ', '.join(duplicates[:5]))
+    stock_df['مفتاح المطابقة'] = stock_df.apply(lambda row: item_link_key(row['رمز المادة'], row['اسم المادة']), axis=1)
+    stock_df['مفتاح المخزون'] = stock_df['رمز المادة'].map(lambda code: f'CODE:{code}')
     return stock_df
+
 
 COL_CODE = "رمز المادة"
 COL_NAME = "اسم المادة"
