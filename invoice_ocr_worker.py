@@ -29,10 +29,10 @@ for _name in (
 os.environ["MALLOC_ARENA_MAX"] = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-BUILD = "GP-OCR-ONNX-LITE-v5"
+BUILD = "GP-OCR-WAREHOUSE-v9"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
-MAX_SOURCE_SIDE = 1800
+MAX_SOURCE_SIDE = 1200
 MAX_ROWS = 60
 _MIN_SCORE = 0.35
 _engine = None
@@ -48,12 +48,29 @@ def get_engine():
     if _engine is not None:
         return _engine
     _stage("import_start")
-    from rapidocr import RapidOCR
+    from rapidocr import EngineType, LangDet, LangRec, ModelType, OCRVersion, RapidOCR
 
-    # The default RapidOCR pipeline uses ONNX Runtime on CPU. Keeping one engine
-    # per disposable worker avoids repeated construction inside a single scan,
-    # while the parent process remains model-free.
-    _engine = RapidOCR()
+    # Numeric/Latin invoice fields do not need the larger multilingual defaults.
+    # Mobile PP-OCRv4 models plus one ONNX thread reduce host memory and latency.
+    _engine = RapidOCR(params={
+        "Global.use_cls": False,
+        "Global.max_side_len": 900,
+        "Global.text_score": 0.35,
+        "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+        "EngineConfig.onnxruntime.enable_cpu_mem_arena": False,
+        "Det.engine_type": EngineType.ONNXRUNTIME,
+        "Det.lang_type": LangDet.EN,
+        "Det.model_type": ModelType.MOBILE,
+        "Det.ocr_version": OCRVersion.PPOCRV4,
+        "Det.limit_side_len": 640,
+        "Det.limit_type": "max",
+        "Rec.engine_type": EngineType.ONNXRUNTIME,
+        "Rec.lang_type": LangRec.EN,
+        "Rec.model_type": ModelType.MOBILE,
+        "Rec.ocr_version": OCRVersion.PPOCRV4,
+        "Rec.rec_batch_num": 1,
+    })
     _stage("model_load_done")
     return _engine
 
@@ -126,15 +143,41 @@ def _normalize_output(output):
 def run_ocr(array):
     engine = get_engine()
     _stage("ocr_start", height=array.shape[0], width=array.shape[1])
-    output = engine(array)
+    output = engine(array, use_cls=False)
     boxes = _normalize_output(output)
     _stage("ocr_done", boxes=len(boxes))
     return boxes
 
 
+def _run_region(array, region, x0, y0, x1, y1):
+    height, width = array.shape[:2]
+    left, top = int(width * x0), int(height * y0)
+    right, bottom = int(width * x1), int(height * y1)
+    crop = array[top:bottom, left:right]
+    if crop.size == 0:
+        return []
+    boxes = run_ocr(crop)
+    for box in boxes:
+        box["x"] += left
+        box["y"] += top
+        box["region"] = region
+    return boxes
+
+
+def run_targeted_ocr(array):
+    """Scan only code, quantity and summary strips; ignore phones, prices and Arabic names."""
+    boxes = []
+    boxes.extend(_run_region(array, "code", 0.70, 0.28, 1.00, 0.63))
+    boxes.extend(_run_region(array, "qty", 0.17, 0.28, 0.44, 0.63))
+    boxes.extend(_run_region(array, "summary", 0.00, 0.58, 0.55, 0.78))
+    _stage("targeted_ocr_done", boxes=len(boxes))
+    return boxes
+
 def parse_codes(boxes, width, height):
     rows = []
     for box in sorted(boxes, key=lambda b: b["y"]):
+        if box.get("region") not in (None, "code"):
+            continue
         # Codes are in the right-side item-code column in the Golden Palace layout.
         if box["x"] < width * 0.72 or not (height * 0.28 <= box["y"] <= height * 0.67):
             continue
@@ -155,7 +198,9 @@ def parse_codes(boxes, width, height):
 def parse_quantity(boxes, row_y, width, height):
     candidates = []
     for box in boxes:
-        if not (width * 0.18 <= box["x"] <= width * 0.40):
+        if box.get("region") not in (None, "qty"):
+            continue
+        if not (width * 0.15 <= box["x"] <= width * 0.45):
             continue
         if abs(box["y"] - row_y) > height * 0.025:
             continue
@@ -185,6 +230,8 @@ def parse_summary(boxes, width, height):
     reference_candidates = []
     total_candidates = []
     for box in boxes:
+        if box.get("region") not in (None, "summary"):
+            continue
         text = _clean(box["text"]).replace(" ", "").replace(",", ".")
         if box["score"] < _MIN_SCORE:
             continue
@@ -222,7 +269,7 @@ def extract_invoice(image_path):
     if width > height:
         raise ValueError("Use a portrait photo with the complete page upright.")
 
-    boxes = run_ocr(array)
+    boxes = run_targeted_ocr(array)
     rows = parse_codes(boxes, width, height)
     warnings = [
         "هذه قراءة للرموز والكميات فقط. راجع الصورة وكل سطر قبل الاعتماد.",
