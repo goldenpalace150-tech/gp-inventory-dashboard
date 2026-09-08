@@ -1,9 +1,8 @@
-"""Isolated, CPU-only invoice reader for the Golden Palace numeric template.
+"""Isolated low-memory OCR for the Golden Palace invoice template.
 
-No Streamlit/database imports and no paid API. Only printed 0-9 item codes,
-quantities and the numeric reference are read. Names and IN/OUT are reviewed
-in the app. Model weights may be downloaded from EasyOCR's official releases;
-invoice bytes are never sent to a remote OCR service.
+This worker uses RapidOCR + ONNX Runtime instead of EasyOCR/PyTorch. It reads
+only the numeric fields required by the inventory app: item codes, quantities
+and invoice reference. Arabic product names continue to come from stock data.
 """
 from __future__ import annotations
 
@@ -18,130 +17,133 @@ import sys
 import time
 import traceback
 
-for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+for _name in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "OMP_THREAD_LIMIT",
+):
     os.environ[_name] = "1"
 os.environ["MALLOC_ARENA_MAX"] = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-BUILD = "GP-OCR-CPU-LITE-v4"
+BUILD = "GP-OCR-ONNX-LITE-v5"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
-MAX_SOURCE_SIDE = 2000
-MAX_CANVAS = 768
+MAX_SOURCE_SIDE = 1800
 MAX_ROWS = 60
-_MIN_CONFIDENCE = 0.40
-_reader = None
-_np = None
-_torch = None
+_MIN_SCORE = 0.35
+_engine = None
 
 
 def _stage(name: str, **details) -> None:
-    """Log stages/resources, never item codes, document text or invoice names."""
     suffix = " ".join(f"{key}={value}" for key, value in details.items())
     print(f"[{BUILD}] {name} {suffix}".rstrip(), flush=True)
 
 
-def get_reader():
-    global _reader, _np, _torch
-    if _reader is not None:
-        return _reader
+def get_engine():
+    global _engine
+    if _engine is not None:
+        return _engine
     _stage("import_start")
-    import numpy as np
-    import torch
-    import cv2
-    import easyocr
-    _np, _torch = np, torch
-    _stage("dependencies", torch=torch.__version__, cuda=torch.version.cuda,
-           easyocr=easyocr.__version__, numpy=np.__version__)
-    if torch.version.cuda is not None:
-        raise RuntimeError(
-            "The installed torch build still contains CUDA. Install the supplied "
-            "CPU-only requirements.txt and reboot before scanning."
-        )
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
-    cv2.setNumThreads(1)
-    _stage("model_load_start")
-    # English gen2 handles the printed 0-9 digits in the sample without loading
-    # the Arabic recognizer. The stock catalogue provides Arabic product names.
-    _reader = easyocr.Reader(
-        ["en"], gpu=False, quantize=False, verbose=False,
-        download_enabled=True,
-    )
+    from rapidocr import RapidOCR
+
+    # The default RapidOCR pipeline uses ONNX Runtime on CPU. Keeping one engine
+    # per disposable worker avoids repeated construction inside a single scan,
+    # while the parent process remains model-free.
+    _engine = RapidOCR()
     _stage("model_load_done")
-    return _reader
+    return _engine
 
 
 def _clean(value) -> str:
     return str(value or "").strip().replace("\u200e", "").replace("\u200f", "")
 
 
-def _prepare_crop(image, rect, max_side=MAX_CANVAS):
-    """Crop before enlarging. Both dimensions are strictly bounded."""
+def _load_image(path):
     from PIL import Image, ImageEnhance, ImageOps
-    left, top, right, bottom = rect
-    left, top = max(0, int(left)), max(0, int(top))
-    right, bottom = min(image.width, int(right)), min(image.height, int(bottom))
-    if right <= left or bottom <= top:
-        raise ValueError("Empty invoice crop; use a clear photo of the entire page.")
-    crop = image.crop((left, top, right, bottom))
-    gray = ImageOps.autocontrast(ImageOps.grayscale(crop), cutoff=1)
-    gray = ImageEnhance.Contrast(gray).enhance(1.20)
-    limit = min(MAX_CANVAS, max(32, int(max_side)))
-    scale = min(3.0, limit / max(gray.size))
-    width = max(1, min(limit, round(gray.width * scale)))
-    height = max(1, min(limit, round(gray.height * scale)))
-    prepared = gray.resize((width, height), Image.Resampling.LANCZOS)
-    # Keep separate exact scales because rounded dimensions may differ slightly.
-    return prepared, (left, top, width / crop.width, height / crop.height)
+    import numpy as np
+
+    source = Path(path)
+    if source.stat().st_size > MAX_IMAGE_BYTES:
+        raise ValueError("Image exceeds 12 MB. Upload a smaller JPEG/PNG.")
+    with Image.open(source) as original:
+        if original.width * original.height > MAX_IMAGE_PIXELS:
+            raise ValueError("Image exceeds 24 megapixels. Resize it before scanning.")
+        original.draft("RGB", (MAX_SOURCE_SIDE, MAX_SOURCE_SIDE))
+        image = ImageOps.exif_transpose(original).convert("RGB")
+        image.thumbnail((MAX_SOURCE_SIDE, MAX_SOURCE_SIDE), Image.Resampling.LANCZOS)
+        image = ImageEnhance.Contrast(image).enhance(1.08)
+        array = np.asarray(image)
+    return image, array
 
 
-def read_region(image, rect, allowlist="0123456789.,", stage="region"):
-    prepared, (left, top, scale_x, scale_y) = _prepare_crop(image, rect)
-    reader = get_reader()
-    array = _np.asarray(prepared)
-    _stage(stage + "_start", width=prepared.width, height=prepared.height)
-    with _torch.inference_mode():
-        raw = reader.readtext(
-            array, detail=1, paragraph=False, decoder="greedy",
-            allowlist=allowlist, batch_size=1, workers=0,
-            canvas_size=MAX_CANVAS, mag_ratio=1.0,
-            rotation_info=None, contrast_ths=0.0,
-        )
+def _normalize_output(output):
+    """Return list of {text, score, x, y} across RapidOCR output versions."""
     result = []
-    for entry in raw:
-        if not isinstance(entry, (tuple, list)) or len(entry) != 3:
-            continue
-        bbox, text, confidence = entry
+    # RapidOCR 3.x exposes boxes/txts/scores; older adapters may be tuple-like.
+    boxes = getattr(output, "boxes", None)
+    txts = getattr(output, "txts", None)
+    scores = getattr(output, "scores", None)
+    if boxes is not None and txts is not None:
+        scores = scores if scores is not None else [1.0] * len(txts)
+        iterable = zip(boxes, txts, scores)
+    elif isinstance(output, (tuple, list)) and len(output) >= 1:
+        raw = output[0] if len(output) == 2 and isinstance(output[0], list) else output
+        iterable = []
+        for item in raw or []:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                bbox = item[0]
+                text = item[1]
+                score = item[2] if len(item) >= 3 else 1.0
+                iterable.append((bbox, text, score))
+    else:
+        iterable = []
+
+    for bbox, text, score in iterable:
         try:
-            confidence = float(confidence)
-            xs = [float(point[0]) / scale_x + left for point in bbox]
-            ys = [float(point[1]) / scale_y + top for point in bbox]
-            if not math.isfinite(confidence) or not all(map(math.isfinite, xs + ys)):
+            pts = list(bbox)
+            xs = [float(p[0]) for p in pts]
+            ys = [float(p[1]) for p in pts]
+            score = float(score)
+            if not math.isfinite(score) or not all(map(math.isfinite, xs + ys)):
                 continue
-            result.append({"text": _clean(text), "confidence": confidence,
-                           "x": sum(xs) / len(xs), "y": sum(ys) / len(ys)})
-        except (ValueError, TypeError, ZeroDivisionError):
+            result.append(
+                {
+                    "text": _clean(text),
+                    "score": score,
+                    "x": sum(xs) / len(xs),
+                    "y": sum(ys) / len(ys),
+                }
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
             continue
-    del raw, array, prepared
-    gc.collect()
-    _stage(stage + "_done", boxes=len(result))
     return result
 
 
-def parse_codes(boxes, height):
+def run_ocr(array):
+    engine = get_engine()
+    _stage("ocr_start", height=array.shape[0], width=array.shape[1])
+    output = engine(array)
+    boxes = _normalize_output(output)
+    _stage("ocr_done", boxes=len(boxes))
+    return boxes
+
+
+def parse_codes(boxes, width, height):
     rows = []
-    for box in sorted(boxes, key=lambda box: box["y"]):
-        code = _clean(box["text"]).replace(" ", "")
-        # Preserve leading zeros. No fuzzy matching or made-up missing digits.
-        if not re.fullmatch(r"[0-9]{4,12}", code):
+    for box in sorted(boxes, key=lambda b: b["y"]):
+        # Codes are in the right-side item-code column in the Golden Palace layout.
+        if box["x"] < width * 0.72 or not (height * 0.28 <= box["y"] <= height * 0.67):
             continue
-        if box["confidence"] < _MIN_CONFIDENCE:
+        text = re.sub(r"[^0-9]", "", _clean(box["text"]))
+        if not re.fullmatch(r"[0-9]{4,12}", text) or box["score"] < _MIN_SCORE:
             continue
-        row = {"code": code, "y": box["y"], "confidence": box["confidence"]}
-        if rows and abs(row["y"] - rows[-1]["y"]) < height * 0.009:
-            if row["confidence"] > rows[-1]["confidence"]:
+        row = {"code": text, "y": box["y"], "score": box["score"]}
+        if rows and abs(row["y"] - rows[-1]["y"]) < height * 0.012:
+            if row["score"] > rows[-1]["score"]:
                 rows[-1] = row
         else:
             rows.append(row)
@@ -150,114 +152,123 @@ def parse_codes(boxes, height):
     return rows
 
 
-def parse_quantity(boxes, row_y, half_height):
+def parse_quantity(boxes, row_y, width, height):
     candidates = []
     for box in boxes:
+        if not (width * 0.18 <= box["x"] <= width * 0.40):
+            continue
+        if abs(box["y"] - row_y) > height * 0.025:
+            continue
         text = _clean(box["text"]).replace(" ", "").replace(",", ".")
+        text = re.sub(r"[^0-9.]", "", text)
         if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", text):
             continue
-        value = float(text)
-        distance = abs(box["y"] - row_y)
-        if (not math.isfinite(value) or not 0 < value < 100000
-                or box["confidence"] < _MIN_CONFIDENCE
-                or distance > half_height):
+        try:
+            value = float(text)
+        except ValueError:
             continue
-        candidates.append((distance, value))
-    # Ambiguity stays blank for review; do not pick a convenient quantity.
-    if not candidates or len({value for _, value in candidates}) != 1:
+        if box["score"] < _MIN_SCORE or not math.isfinite(value) or not 0 < value < 100000:
+            continue
+        candidates.append((abs(box["y"] - row_y), value, box["score"]))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], -item[2]))
+    # If multiple distinct values are equally plausible, leave blank for review.
+    close = [v for d, v, _ in candidates if d <= candidates[0][0] + height * 0.006]
+    if len(set(close)) > 1:
         return None
     return candidates[0][1]
 
 
-def parse_summary(boxes):
-    references = []
+def parse_summary(boxes, width, height):
+    reference_candidates = []
+    total_candidates = []
     for box in boxes:
-        text = _clean(box["text"]).replace(" ", "")
-        if (re.fullmatch(r"[0-9]{3,8}", text)
-                and box["confidence"] >= _MIN_CONFIDENCE):
-            references.append((text, box["y"]))
-    values = {text for text, _ in references}
-    reference = next(iter(values)) if len(values) == 1 else ""
-    total = None
+        text = _clean(box["text"]).replace(" ", "").replace(",", ".")
+        if box["score"] < _MIN_SCORE:
+            continue
+        if box["x"] <= width * 0.24 and height * 0.60 <= box["y"] <= height * 0.80:
+            digits = re.sub(r"[^0-9]", "", text)
+            if re.fullmatch(r"[0-9]{3,8}", digits):
+                reference_candidates.append((digits, box["score"], box["y"]))
+            number_text = re.sub(r"[^0-9.]", "", text)
+            if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", number_text):
+                try:
+                    value = float(number_text)
+                    if math.isfinite(value) and value >= 0:
+                        total_candidates.append((value, box["y"]))
+                except ValueError:
+                    pass
+
+    reference = ""
+    if reference_candidates:
+        reference_candidates.sort(key=lambda x: (-x[1], x[2]))
+        reference = reference_candidates[0][0]
+
+    printed_total = None
     if reference:
-        ref_y = min(y for text, y in references if text == reference)
-        totals = set()
-        for box in boxes:
-            text = _clean(box["text"]).replace(" ", "").replace(",", ".")
-            if (box["y"] > ref_y and box["confidence"] >= _MIN_CONFIDENCE
-                    and re.fullmatch(r"[0-9]+\.[0-9]+", text)):
-                number = float(text)
-                if math.isfinite(number) and number >= 0:
-                    totals.add(number)
+        ref_y = next(y for text, _, y in reference_candidates if text == reference)
+        totals = {v for v, y in total_candidates if y > ref_y + height * 0.01}
         if len(totals) == 1:
-            total = next(iter(totals))
-    return reference, total
+            printed_total = next(iter(totals))
+    return reference, printed_total
 
 
 def extract_invoice(image_path):
-    from PIL import Image, ImageOps
-    source = Path(image_path)
-    if source.stat().st_size > MAX_IMAGE_BYTES:
-        raise ValueError("Image exceeds 12 MB. Upload a smaller JPEG/PNG.")
-    with Image.open(source) as original:
-        if original.width * original.height > MAX_IMAGE_PIXELS:
-            raise ValueError("Image exceeds 24 megapixels. Resize it before scanning.")
-        # JPEG draft reduces decoder memory before resizing; PNG still has the
-        # explicit pixel/file-size limits above.
-        original.draft("RGB", (MAX_SOURCE_SIDE, MAX_SOURCE_SIDE))
-        image = ImageOps.exif_transpose(original).convert("RGB")
-        image.thumbnail((MAX_SOURCE_SIDE, MAX_SOURCE_SIDE), Image.Resampling.LANCZOS)
+    image, array = _load_image(image_path)
     width, height = image.size
     _stage("image_ready", width=width, height=height)
     if width > height:
         raise ValueError("Use a portrait photo with the complete page upright.")
 
-    # This is the existing Golden Palace page layout, not a general invoice OCR.
-    code_boxes = read_region(image, (width * .76, height * .28, width, height * .66),
-                             "0123456789", "codes")
-    rows = parse_codes(code_boxes, height)
+    boxes = run_ocr(array)
+    rows = parse_codes(boxes, width, height)
     warnings = [
-        "\u0647\u0630\u0647 \u0642\u0631\u0627\u0621\u0629 \u0644\u0644\u0631\u0645\u0648\u0632 \u0648\u0627\u0644\u0643\u0645\u064a\u0627\u062a \u0641\u0642\u0637. \u0631\u0627\u062c\u0639 \u0627\u0644\u0635\u0648\u0631\u0629 \u0648\u0643\u0644 \u0633\u0637\u0631 \u0642\u0628\u0644 \u0627\u0644\u0627\u0639\u062a\u0645\u0627\u062f.",
-        "\u0646\u0648\u0639 \u0627\u0644\u062d\u0631\u0643\u0629 \u0644\u0645 \u064a\u064f\u0642\u0631\u0623 \u062a\u0644\u0642\u0627\u0626\u064a\u0627\u064b. \u0627\u062e\u062a\u0631 \u0625\u062f\u062e\u0627\u0644 \u0623\u0648 \u0625\u062e\u0631\u0627\u062c \u064a\u062f\u0648\u064a\u0627\u064b.",
+        "هذه قراءة للرموز والكميات فقط. راجع الصورة وكل سطر قبل الاعتماد.",
+        "نوع الحركة لا يُقرأ تلقائياً. اختر إدخال أو إخراج يدوياً.",
     ]
+
     items = []
     for index, row in enumerate(rows):
-        gaps = [abs(row["y"] - other["y"]) for other in rows if other is not row]
-        half_height = max(8, min(height * .025, min(gaps, default=height * .06) * .4))
-        boxes = read_region(image, (width * .20, row["y"] - half_height,
-                                    width * .37, row["y"] + half_height),
-                            stage=f"quantity_{index + 1}")
-        quantity = parse_quantity(boxes, row["y"], half_height)
+        quantity = parse_quantity(boxes, row["y"], width, height)
         if quantity is None:
             warnings.append(f"Row {index + 1}: quantity is uncertain; enter it manually.")
         items.append({"item_code": row["code"], "item_name": "", "quantity": quantity})
-    reference, printed_total = "", None
-    if rows:
-        last_y = rows[-1]["y"]
-        summary = read_region(image, (0, last_y + height * .020,
-                                      width * .22, min(height * .79, last_y + height * .18)),
-                              stage="summary")
-        reference, printed_total = parse_summary(summary)
+
+    reference, printed_total = parse_summary(boxes, width, height)
     if not reference:
         warnings.append("Reference is uncertain; enter the reference from the document.")
+
     known_quantities = [item["quantity"] for item in items if item["quantity"] is not None]
     if printed_total is not None and len(known_quantities) == len(items):
-        if not math.isclose(sum(known_quantities), printed_total, abs_tol=.001):
+        if not math.isclose(sum(known_quantities), printed_total, abs_tol=0.001):
             warnings.append("The row quantities do not match the candidate printed total. Review every row.")
     else:
         warnings.append("The printed total was not verified. Check row count and total manually.")
+
     if not items:
         warnings.append("No reliable item rows were found. Enter rows manually in the review table.")
-    # This is a completeness indicator, never a calibrated OCR accuracy claim.
-    completeness = .4 * bool(items) + .2 * bool(reference)
+
+    completeness = 0.4 * bool(items) + 0.2 * bool(reference)
     if items:
-        completeness += .2 * len(known_quantities) / len(items)
+        completeness += 0.2 * len(known_quantities) / len(items)
+
+    del boxes, array, image
+    gc.collect()
     _stage("extraction_done", rows=len(items))
-    return {"invoice_number": reference, "movement_type": "OUT",
-            "movement_detected": False, "confidence": min(.8, completeness),
-            "items": items, "warnings": warnings, "printed_total_candidate": printed_total,
-            "ocr_engine": BUILD, "ocr_text": "Numeric-only mode: Arabic names come from stock.",
-            "reference_ocr_text": reference}
+    return {
+        "invoice_number": reference,
+        "movement_type": "OUT",
+        "movement_detected": False,
+        "confidence": min(0.8, completeness),
+        "items": items,
+        "warnings": warnings,
+        "printed_total_candidate": printed_total,
+        "ocr_engine": BUILD,
+        "ocr_text": "Numeric-only mode: Arabic names come from stock.",
+        "reference_ocr_text": reference,
+    }
 
 
 def main():
@@ -274,7 +285,9 @@ def main():
         traceback.print_exc()
         payload = {"ok": False, "error": f"{type(error).__name__}: {error}"}
         exit_code = 1
-    Path(sys.argv[2]).write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    Path(sys.argv[2]).write_text(
+        json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8"
+    )
     _stage("worker_exit", code=exit_code, seconds=round(time.monotonic() - start, 2))
     return exit_code
 
