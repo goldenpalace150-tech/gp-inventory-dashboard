@@ -364,7 +364,7 @@ def imports_panel(store,token,state,stock):
                     if st.form_submit_button(t("Import"),type="primary"):
                         if not confirmed:raise AppError("Confirm baseline")
                         with branded_wait("Importing stock"):
-                            store.replace_stock(token,password,df,nonce("baseline"),state["revision"])
+                            store.replace_stock(token,password,df,nonce("baseline"),state["revision"],source_name=uploaded.name)
                         success("baseline")
             except Exception as error:show_error(error)
     with st.expander(t("Upload history")):
@@ -390,6 +390,66 @@ def imports_panel(store,token,state,stock):
             except Exception as error:show_error(error)
 
 
+def _local_stamp(store,value):
+    try:return aware(value).astimezone(store.tz).strftime("%Y-%m-%d %H:%M")
+    except Exception:return str(value)
+
+
+def deletion_panel(store,token):
+    catalog=store.deletion_catalog(token)
+    st.warning(t("Delete data warning"))
+
+    st.markdown("#### "+t("Delete invoice"))
+    invoices=catalog["invoices"]
+    if invoices:
+        by_ref={row["invoice_reference"]:row for row in invoices if row["invoice_reference"]}
+        refs=list(by_ref)
+        selected=st.selectbox(t("Invoices"),refs,format_func=lambda ref:
+            f"{ref} | {_local_stamp(store,by_ref[ref]['created_at'])} | {by_ref[ref]['line_count']} {t('Items')}",key="delete_invoice_select")
+        with st.form("delete_invoice_form"):
+            st.caption(t("Delete reverses warehouse quantity"))
+            confirmed=st.checkbox(t("Confirm delete"),key="delete_invoice_confirm")
+            password=st.text_input(t("Approval password"),type="password",key="password_delete_invoice")
+            if st.form_submit_button(t("Delete invoice"),type="primary",disabled=not confirmed):
+                try:store.delete_invoice(token,password,selected);success(message="Deleted")
+                except Exception as error:show_error(error)
+    else:st.info(t("No deletable invoices"))
+
+    st.divider()
+    st.markdown("#### "+t("Delete movement"))
+    movements=catalog["movements"]
+    if movements:
+        by_id={row["operation_id"]:row for row in movements}; ids=list(by_id)
+        selected=st.selectbox(t("Movements"),ids,format_func=lambda op:
+            f"{_local_stamp(store,by_id[op]['created_at'])} | {by_id[op]['movement_type']} | {by_id[op]['item_code']} | {by_id[op]['item_name']} | {by_id[op]['quantity']:g}",key="delete_movement_select")
+        with st.form("delete_movement_form"):
+            st.caption(t("Delete reverses warehouse quantity"))
+            confirmed=st.checkbox(t("Confirm delete"),key="delete_movement_confirm")
+            password=st.text_input(t("Approval password"),type="password",key="password_delete_movement")
+            if st.form_submit_button(t("Delete movement"),type="primary",disabled=not confirmed):
+                try:store.delete_movement(token,password,selected);success(message="Deleted")
+                except Exception as error:show_error(error)
+    else:st.info(t("No deletable movements"))
+
+    st.divider()
+    st.markdown("#### "+t("Delete warehouse report"))
+    reports=catalog["stock_reports"]
+    if reports:
+        by_id={row["operation_id"]:row for row in reports}; ids=list(by_id)
+        selected=st.selectbox(t("Warehouse reports"),ids,format_func=lambda op:
+            f"{by_id[op]['source_name'] or t('Warehouse report')} | {_local_stamp(store,by_id[op]['created_at'])} | {by_id[op]['item_count']} {t('Items')}",key="delete_stock_report_select")
+        latest=ids[0]
+        if selected!=latest:st.info(t("Only latest warehouse report can be deleted"))
+        with st.form("delete_stock_report_form"):
+            st.caption(t("Warehouse report delete hint"))
+            confirmed=st.checkbox(t("Confirm delete"),key="delete_stock_report_confirm")
+            password=st.text_input(t("Approval password"),type="password",key="password_delete_stock")
+            if st.form_submit_button(t("Delete warehouse report"),type="primary",disabled=not (confirmed and selected==latest)):
+                try:store.delete_stock_report(token,password,selected);success(message="Deleted")
+                except Exception as error:show_error(error)
+    else:st.info(t("No warehouse reports"))
+
+
 def settings_page(store,token,state,stock,actor):
     section("Settings")
     with st.container(border=True):
@@ -399,6 +459,10 @@ def settings_page(store,token,state,stock,actor):
     if actor["role"]=="admin":
         section("Import data")
         imports_panel(store,token,state,stock)
+        st.divider()
+        with st.expander(t("Delete data")):
+            deletion_panel(store,token)
+        st.divider()
         with st.expander(t("Reorder settings")):
             settings=state["settings"]
             with st.form("settings_form"):
@@ -406,10 +470,13 @@ def settings_page(store,token,state,stock,actor):
                 lead=a.number_input(t("Lead days"),min_value=1,max_value=730,value=int(settings["lead_days"]))
                 safety=b.number_input(t("Safety days"),min_value=0,max_value=365,value=int(settings["safety_days"]))
                 slow=c.number_input(t("Slow days"),min_value=30,max_value=730,value=int(settings["slow_days"]))
+                st.divider()
                 a,b=st.columns(2)
                 demand=a.number_input(t("Demand days"),min_value=7,max_value=730,value=int(settings["demand_window_days"]))
                 review=b.number_input(t("Review days"),min_value=1,max_value=365,value=int(settings["review_days"]))
+                st.divider()
                 prefixes=st.text_input(t("Purchase prefixes"),value=", ".join(settings["purchase_prefixes"]))
+                st.divider()
                 password=st.text_input(t("Approval password"),type="password",key="password_settings")
                 if st.form_submit_button(t("Save"),type="primary"):
                     try:
