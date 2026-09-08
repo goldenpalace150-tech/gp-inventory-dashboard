@@ -1,0 +1,19 @@
+
+/* v6 language switch + branded busy overlay */
+.st-key-language_switch { max-width:230px; margin:0 0 .55rem auto; }
+.st-key-language_switch [data-testid="stButtonGroup"] > div { gap:4px; }
+.st-key-language_switch button { min-height:36px; font-weight:800; }
+.stApp:has(.gp-lang-en-marker) [data-testid="stMainBlockContainer"] h1,
+.stApp:has(.gp-lang-en-marker) [data-testid="stMainBlockContainer"] h2,
+.stApp:has(.gp-lang-en-marker) [data-testid="stMainBlockContainer"] h3,
+.stApp:has(.gp-lang-en-marker) [data-testid="stMarkdownContainer"] p,
+.stApp:has(.gp-lang-en-marker) [data-testid="stWidgetLabel"] { direction:ltr; text-align:left; }
+.stApp:has(.gp-lang-en-marker) [data-testid="stTextInput"] input:not([type="password"]),
+.stApp:has(.gp-lang-en-marker) [data-testid="stTextArea"] textarea { direction:ltr; text-align:left; }
+.stApp:has(.gp-lang-en-marker) .st-key-navigation [data-testid="stButtonGroup"] > div { direction:ltr; }
+.stApp:has(.gp-lang-en-marker) .st-key-language_switch { margin-left:auto; margin-right:0; }
+.gp-loading-backdrop { position:fixed; inset:0; z-index:999999; display:flex; align-items:center; justify-content:center; background:rgba(18,38,62,.35); backdrop-filter:blur(3px); }
+.gp-loading-card { width:min(360px,82vw); background:#fff; border:1px solid #d8c184; border-radius:22px; padding:25px 28px; box-shadow:0 24px 70px rgba(18,38,62,.26); display:flex; align-items:center; justify-content:center; gap:14px; color:var(--gp-navy); font-weight:850; font-size:1.05rem; }
+.gp-loading-card img { width:48px; height:48px; object-fit:contain; }
+.gp-loading-ring { width:24px; height:24px; border:3px solid #e7edf3; border-top-color:var(--gp-gold); border-radius:50%; animation:gp-spin .75s linear infinite; }
+@keyframes gp-spin { to { transform:rotate(360deg); } }
