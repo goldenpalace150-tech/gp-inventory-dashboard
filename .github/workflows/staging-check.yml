@@ -13,7 +13,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,12 +21,25 @@ jobs:
           python-version: '3.11'
       - name: Verify and assemble logo
         run: python scripts/assemble_assets.py
-      - name: Install test dependencies without OCR models
+      - name: Install lightweight app test dependencies
         run: python -m pip install 'pytest>=8,<10' 'pandas>=2.2,<4' 'SQLAlchemy>=2.0.36,<3' 'cryptography>=44,<50' 'Pillow>=10.4,<13' 'openpyxl>=3.1.5,<4' xlrd==2.0.2
       - name: Compile application modules
         run: python -m compileall -q inventory_tracker.py gp_store.py gp_core.py gp_invoice.py gp_ocr.py gp_ui.py gp_reports.py gp_backup.py invoice_ocr_worker.py scripts
       - name: Run offline regression tests
         run: python -m pytest -o addopts='' -q
+      - name: Install ONNX OCR dependencies
+        run: python -m pip install 'numpy==1.26.4' 'opencv-python-headless==4.11.0.86' 'rapidocr==3.9.2' 'onnxruntime>=1.22,<2'
+      - name: Smoke test RapidOCR engine
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from rapidocr import RapidOCR
+          engine = RapidOCR()
+          image = np.full((240, 800, 3), 255, dtype=np.uint8)
+          result = engine(image)
+          assert result is not None
+          print('RapidOCR smoke test passed:', type(result).__name__)
+          PY
   publish-logo:
     needs: validate
     if: github.event_name == 'push' && github.ref == 'refs/heads/cloud-v5-staging'
