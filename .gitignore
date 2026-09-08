@@ -1,0 +1,13 @@
+.streamlit/secrets.toml
+.env
+.env.*
+__pycache__/
+.pytest_cache/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+backups/
+*.gpbackup
+*.json.gz
+*.key
