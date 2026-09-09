@@ -179,7 +179,8 @@ def invoices_page(store,token,state,stock):
                 else:
                     with branded_wait("Reading"):
                         try:
-                            result=extract_invoice_data(uploaded,stock); result["movement_type"]=""
+                            result=extract_invoice_data(uploaded,stock)
+                            if result.get("movement_type") not in ("IN","OUT"): result["movement_type"]=""
                             result.setdefault("customer_name",""); result.setdefault("driver","")
                             store.save_draft(token,draft_id,result,pending[draft_id]["version"])
                             success(message="Saved")
@@ -461,13 +462,11 @@ def deletion_panel(store,token):
         by_id={row["operation_id"]:row for row in reports}; ids=list(by_id)
         selected=st.selectbox(t("Warehouse reports"),ids,format_func=lambda op:
             f"{by_id[op]['source_name'] or t('Warehouse report')} | {_local_stamp(store,by_id[op]['created_at'])} | {by_id[op]['item_count']} {t('Items')}",key="delete_stock_report_select")
-        latest=ids[0]
-        if selected!=latest:st.info(t("Only latest warehouse report can be deleted"))
         with st.form("delete_stock_report_form"):
             st.caption(t("Warehouse report delete hint"))
             confirmed=st.checkbox(t("Confirm delete"),key="delete_stock_report_confirm")
             password=st.text_input(t("Approval password"),type="password",key="password_delete_stock")
-            if st.form_submit_button(t("Delete warehouse report"),type="primary",disabled=not (confirmed and selected==latest)):
+            if st.form_submit_button(t("Delete warehouse report"),type="primary",disabled=not confirmed):
                 try:store.delete_stock_report(token,password,selected);success(message="Deleted")
                 except Exception as error:show_error(error)
     else:st.info(t("No warehouse reports"))

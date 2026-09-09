@@ -13,7 +13,7 @@ import threading
 from gp_core import normalize_item_code
 from gp_invoice import canonicalize_invoice_rows
 
-OCR_BUILD = "GP-OCR-WAREHOUSE-v9"
+OCR_BUILD = "GP-OCR-WAREHOUSE-v12"
 OCR_TIMEOUT_SECONDS = 90
 OCR_MAX_WORKER_MB = 360
 OCR_MAX_UPLOAD_BYTES = 12 * 1024 * 1024
@@ -28,10 +28,10 @@ def free_ocr_status():
     worker = Path(__file__).resolve().with_name("invoice_ocr_worker.py")
     if not worker.is_file():
         return (False, "", "Missing invoice_ocr_worker.py")
-    missing = [name for name in ("rapidocr", "onnxruntime") if importlib.util.find_spec(name) is None]
+    missing = [name for name in ("rapidocr", "onnxruntime", "bidi") if importlib.util.find_spec(name) is None]
     if missing:
         return (False, "", "Missing packages: " + ", ".join(missing))
-    return (True, "numbers", OCR_BUILD + " | free local ONNX code/quantity reader")
+    return (True, "numbers", OCR_BUILD + " | free local ONNX code/quantity/header reader")
 
 
 def _ocr_scan_lock():

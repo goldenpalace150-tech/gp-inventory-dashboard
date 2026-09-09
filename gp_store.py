@@ -906,36 +906,34 @@ class Store:
             return self._delete_posted_operation_tx(c,actor,operation_id,"MANUAL")
 
     def delete_stock_report(self,token,password,operation_id):
-        """Undo only the latest baseline when no later movement/closure depends on it."""
+        """Admin-only force delete of a warehouse-report record.
+
+        This deliberately removes the selected baseline snapshot/history record without
+        rewinding current stock or later ledger rows. It therefore has no dependency
+        condition and cannot invalidate quantities already used by later movements.
+        """
         with self.engine.begin() as c:
             self._lock(c); actor=self._actor(c,token,password,admin=True)
             baselines=self.tables["baseline_snapshots"]; operations=self.tables["operations"]
-            latest=c.execute(select(baselines).order_by(baselines.c.created_at.desc()).limit(1).with_for_update()).mappings().first()
-            if not latest or latest["operation_id"]!=str(operation_id):
-                raise AppError("Only the latest warehouse report can be deleted")
-            op=c.execute(select(operations).where(operations.c.operation_id==latest["operation_id"]).with_for_update()).mappings().first()
+            target=c.execute(select(baselines).where(
+                baselines.c.operation_id==str(operation_id)
+            ).with_for_update()).mappings().first()
+            if not target:raise AppError("Record not found")
+            op=c.execute(select(operations).where(
+                operations.c.operation_id==target["operation_id"]
+            ).with_for_update()).mappings().first()
             if not op or op["source"]!="BASELINE":raise AppError("Record not found")
-            ledger=self.tables["movement_ledger"]
-            if c.execute(select(ledger.c.ledger_id).where(ledger.c.created_at>latest["created_at"]).limit(1)).first():
-                raise AppError("Delete later movements before deleting this warehouse report")
-            closures=self.tables["daily_closures"]
-            if c.execute(select(closures.c.business_date).where(closures.c.closed_at>=latest["created_at"]).limit(1)).first():
-                raise AppError("A closed day depends on this warehouse report")
-            payload=latest["stock"] if isinstance(latest["stock"],dict) else {}
-            previous=payload.get("before",[]) or []
-            rows=[]; now=utcnow()
-            for row in previous:
-                rows.append(dict(item_key=str(row.get("item_key", "")),item_code=normalize_item_code(row.get("item_code", "")),
-                    item_name=str(row.get("item_name", "")),quantity=decimal_qty(row.get("quantity",0),normalize=True),
-                    match_key=str(row.get("match_key", "")) or item_link_key(row.get("item_code", ""),row.get("item_name", "")),updated_at=now))
-            stock=self.tables["stock_state"]
-            c.execute(delete(stock))
-            if rows:c.execute(insert(stock),rows)
-            c.execute(delete(baselines).where(baselines.c.operation_id==latest["operation_id"]))
-            c.execute(delete(operations).where(operations.c.operation_id==latest["operation_id"]))
-            self._audit(c,actor["username"],"DELETE_STOCK_REPORT",{"operation_id":latest["operation_id"],"restored_items":len(rows),"source_name":payload.get("source_name","")})
+            payload=target["stock"] if isinstance(target["stock"],dict) else {}
+            c.execute(delete(baselines).where(baselines.c.operation_id==target["operation_id"]))
+            c.execute(delete(operations).where(operations.c.operation_id==target["operation_id"]))
+            self._audit(c,actor["username"],"DELETE_STOCK_REPORT",{
+                "operation_id":target["operation_id"],
+                "source_name":payload.get("source_name",""),
+                "forced":True,
+                "current_stock_unchanged":True,
+            })
             self._touch(c)
-            return latest["operation_id"]
+            return target["operation_id"]
 
     def closure(self,token,day):
         with self.engine.connect() as c:

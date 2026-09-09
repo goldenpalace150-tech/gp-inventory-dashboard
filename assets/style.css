@@ -84,3 +84,22 @@ button:focus-visible, input:focus-visible { outline:3px solid var(--gp-gold); ou
 /* v11: visual separation between logical form groups without extra bordered cards. */
 .gp-form-gap { height: 22px; width: 100%; }
 @media (max-width: 800px) { .gp-form-gap { height: 14px; } }
+
+
+/* v12: accessible form cells. Every Streamlit column inside a form is visibly separated. */
+[data-testid="stForm"] [data-testid="stHorizontalBlock"] {
+  gap:12px !important; align-items:stretch !important;
+}
+[data-testid="stForm"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+  border:1px solid #cfd9e5; border-radius:13px; padding:12px 14px 10px;
+  background:#fbfcfe; box-sizing:border-box; min-width:0;
+}
+[data-testid="stForm"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:focus-within {
+  border-color:var(--gp-gold); box-shadow:0 0 0 2px #caa24b24;
+}
+.gp-form-gap { height:12px; }
+@media (max-width:800px) {
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"] { gap:8px !important; }
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { padding:10px; }
+  .gp-form-gap { height:8px; }
+}

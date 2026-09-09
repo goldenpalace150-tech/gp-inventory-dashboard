@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v11"
+BUILD = "GP-CLOUD-v12"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -288,4 +288,11 @@ AR.update({
     "Only today's invoices can be updated": "يمكن تحديث فواتير اليوم المفتوح فقط.",
     "Cannot update because later movements depend on this quantity": "لا يمكن تحديث الفاتورة لأن حركات لاحقة تعتمد على هذه الكمية.",
     "This image was already posted under another invoice number": "تم اعتماد هذه الصورة سابقاً تحت رقم فاتورة آخر.",
+})
+
+
+# ---- v12 OCR + accessibility / force report deletion ----
+AR.update({
+    "Warehouse report delete hint": "الحذف متاح للمدير دون شروط. يتم حذف سجل تقرير المستودع المحدد فقط، ولا يتم تغيير الرصيد الحالي أو الحركات اللاحقة.",
+    "OCR hint": "تُقرأ رموز المواد والكميات ورقم الفاتورة تلقائياً، ويحاول النظام أيضاً تحديد نوع الحركة واسم الزبون من رأس المستند عند ظهورهما بوضوح. تبقى المراجعة قبل الاعتماد إلزامية.",
 })

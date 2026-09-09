@@ -29,13 +29,14 @@ for _name in (
 os.environ["MALLOC_ARENA_MAX"] = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-BUILD = "GP-OCR-WAREHOUSE-v9"
+BUILD = "GP-OCR-WAREHOUSE-v12"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 MAX_SOURCE_SIDE = 1200
 MAX_ROWS = 60
 _MIN_SCORE = 0.35
 _engine = None
+_arabic_engine = None
 
 
 def _stage(name: str, **details) -> None:
@@ -73,6 +74,36 @@ def get_engine():
     })
     _stage("model_load_done")
     return _engine
+
+def get_arabic_engine():
+    """Small Arabic recognition engine used only for the invoice header/recipient."""
+    global _arabic_engine
+    if _arabic_engine is not None:
+        return _arabic_engine
+    _stage("arabic_import_start")
+    from rapidocr import EngineType, LangDet, LangRec, ModelType, OCRVersion, RapidOCR
+
+    _arabic_engine = RapidOCR(params={
+        "Global.use_cls": False,
+        "Global.max_side_len": 900,
+        "Global.text_score": 0.30,
+        "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+        "EngineConfig.onnxruntime.enable_cpu_mem_arena": False,
+        "Det.engine_type": EngineType.ONNXRUNTIME,
+        "Det.lang_type": LangDet.MULTI,
+        "Det.model_type": ModelType.MOBILE,
+        "Det.ocr_version": OCRVersion.PPOCRV5,
+        "Det.limit_side_len": 640,
+        "Det.limit_type": "max",
+        "Rec.engine_type": EngineType.ONNXRUNTIME,
+        "Rec.lang_type": LangRec.ARABIC,
+        "Rec.model_type": ModelType.MOBILE,
+        "Rec.ocr_version": OCRVersion.PPOCRV5,
+        "Rec.rec_batch_num": 1,
+    })
+    _stage("arabic_model_load_done")
+    return _arabic_engine
 
 
 def _clean(value) -> str:
@@ -147,6 +178,85 @@ def run_ocr(array):
     boxes = _normalize_output(output)
     _stage("ocr_done", boxes=len(boxes))
     return boxes
+
+def run_arabic_ocr(array):
+    engine = get_arabic_engine()
+    _stage("arabic_ocr_start", height=array.shape[0], width=array.shape[1])
+    output = engine(array, use_cls=False)
+    boxes = _normalize_output(output)
+    _stage("arabic_ocr_done", boxes=len(boxes))
+    return boxes
+
+
+def run_header_ocr(array):
+    """Read only the document title + recipient/customer strip in Arabic."""
+    global _engine
+    # Numeric recognition is finished before this call. Release that ONNX session
+    # before loading Arabic recognition to stay inside Streamlit Cloud memory.
+    _engine = None
+    gc.collect()
+    height, width = array.shape[:2]
+    left, top = int(width * 0.02), int(height * 0.20)
+    right, bottom = int(width * 0.98), int(height * 0.45)
+    crop = array[top:bottom, left:right]
+    if crop.size == 0:
+        return []
+    boxes = run_arabic_ocr(crop)
+    for box in boxes:
+        box["x"] += left
+        box["y"] += top
+        box["region"] = "header"
+    return boxes
+
+
+def _arabic_search_text(value):
+    value = _clean(value).replace("ـ", "")
+    value = re.sub(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]", "", value)
+    return value.translate(str.maketrans({"أ":"ا", "إ":"ا", "آ":"ا", "ٱ":"ا"}))
+
+
+def parse_header_metadata(boxes, width, height):
+    """Return detected movement IN/OUT and an optional customer/recipient name."""
+    rows = [b for b in sorted(boxes or [], key=lambda b: (b.get("y", 0), -b.get("x", 0)))
+            if b.get("score", 0) >= 0.28 and b.get("region") in (None, "header")]
+    normalized = [_arabic_search_text(row.get("text", "")) for row in rows]
+    joined = " | ".join(normalized)
+
+    movement = ""
+    # Prefer explicit stock terminology. Generic delivery/receipt words are only
+    # fallbacks because they can also appear in explanatory sentences.
+    if any(token in joined for token in ("اخراج مواد", "اخراج مخازن", "حركة اخراج", "مذكرة تسليم")):
+        movement = "OUT"
+    elif any(token in joined for token in ("ادخال مواد", "ادخال مخازن", "حركة ادخال", "مذكرة استلام")):
+        movement = "IN"
+    elif "اخراج" in joined:
+        movement = "OUT"
+    elif "ادخال" in joined:
+        movement = "IN"
+
+    customer = ""
+    labels = ("للسيد", "اسم العميل", "اسم الزبون", "العميل", "الزبون")
+    for index, row in enumerate(rows):
+        raw = _clean(row.get("text", ""))
+        norm = _arabic_search_text(raw)
+        matched = next((label for label in labels if label in norm), None)
+        if not matched:
+            continue
+        # Remove everything through the label. OCR can return the whole explanatory
+        # sentence in one line, so a greedy prefix is intentional here.
+        candidate = re.sub(r"^.*?(?:للسيد|اسم\s*العميل|اسم\s*الزبون|العميل|الزبون)\s*[:：\-]?\s*", "", raw).strip(" :：-ـ")
+        if not candidate and index + 1 < len(rows):
+            candidate = _clean(rows[index + 1].get("text", "")).strip(" :：-ـ")
+        # Golden Palace delivery notes sometimes prefix a section/category before '/'.
+        if "/" in candidate:
+            pieces = [part.strip(" :：-ـ") for part in candidate.split("/") if part.strip(" :：-ـ")]
+            if pieces:
+                candidate = pieces[-1]
+        # Keep only plausible human/customer text and never invent a value.
+        if 2 <= len(candidate) <= 140 and re.search(r"[\u0600-\u06FF]", candidate):
+            customer = candidate
+            break
+    return movement, customer
 
 
 def _run_region(array, region, x0, y0, x1, y1):
@@ -271,10 +381,23 @@ def extract_invoice(image_path):
 
     boxes = run_targeted_ocr(array)
     rows = parse_codes(boxes, width, height)
+    movement_type = ""
+    customer_name = ""
+    header_failed = False
+    try:
+        header_boxes = run_header_ocr(array)
+        movement_type, customer_name = parse_header_metadata(header_boxes, width, height)
+    except Exception as error:
+        # Header metadata is convenience OCR only; numeric stock rows must remain usable.
+        header_failed = True
+        _stage("header_ocr_failed", error_type=type(error).__name__)
     warnings = [
-        "هذه قراءة للرموز والكميات فقط. راجع الصورة وكل سطر قبل الاعتماد.",
-        "نوع الحركة لا يُقرأ تلقائياً. اختر إدخال أو إخراج يدوياً.",
+        "تمت قراءة رموز المواد والكميات ورقم الفاتورة آلياً. راجع كل سطر قبل الاعتماد.",
     ]
+    if not movement_type:
+        warnings.append("نوع الحركة غير مؤكد؛ اختر إدخال أو إخراج يدوياً.")
+    if header_failed:
+        warnings.append("تعذر قراءة بيانات رأس الفاتورة؛ أدخل نوع الحركة واسم الزبون يدوياً عند الحاجة.")
 
     items = []
     for index, row in enumerate(rows):
@@ -300,20 +423,22 @@ def extract_invoice(image_path):
     completeness = 0.4 * bool(items) + 0.2 * bool(reference)
     if items:
         completeness += 0.2 * len(known_quantities) / len(items)
+    completeness += 0.1 * bool(movement_type) + 0.1 * bool(customer_name)
 
     del boxes, array, image
     gc.collect()
     _stage("extraction_done", rows=len(items))
     return {
         "invoice_number": reference,
-        "movement_type": "OUT",
-        "movement_detected": False,
+        "movement_type": movement_type,
+        "movement_detected": bool(movement_type),
+        "customer_name": customer_name,
         "confidence": min(0.8, completeness),
         "items": items,
         "warnings": warnings,
         "printed_total_candidate": printed_total,
         "ocr_engine": BUILD,
-        "ocr_text": "Numeric-only mode: Arabic names come from stock.",
+        "ocr_text": "Warehouse code matching + Arabic header metadata mode.",
         "reference_ocr_text": reference,
     }
 

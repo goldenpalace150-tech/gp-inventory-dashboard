@@ -11,6 +11,7 @@ pyarrow>=14,<25
 # Lightweight free CPU OCR (no PyTorch/CUDA packages)
 rapidocr==3.9.2
 onnxruntime>=1.22,<2
+python-bidi>=0.6,<1
 
 # Cloud database and encrypted backups
 SQLAlchemy>=2.0.36,<3
