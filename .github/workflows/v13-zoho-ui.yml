@@ -1,0 +1,43 @@
+name: V13 Zoho UI validation
+on:
+  push:
+    branches: [zoho-ui-v13]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply v13 UI
+        run: python scripts/v13_zoho_ui.py
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+      - name: Compile
+        run: python -m compileall -q inventory_tracker.py gp_ui.py
+      - name: Regression suite
+        run: python -m pytest -o addopts='' -q
+      - name: Validate v13 markers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('inventory_tracker.py').read_text()
+          ui=Path('gp_ui.py').read_text()
+          css=Path('assets/style.css').read_text()
+          assert 'def dashboard_page(' in app
+          assert 'st.radio(t("Inventory"),nav' in app
+          assert '"Dashboard","Stock","Invoices"' in app
+          assert 'GP-CLOUD-v13' in ui
+          assert 'v13: Zoho-inspired shell' in css
+          print('v13 markers OK')
+          PY
+      - name: Commit validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add inventory_tracker.py gp_ui.py assets/style.css
+          git diff --cached --quiet || git commit -m 'feat: Zoho-inspired warehouse interface v13'
+          git push
