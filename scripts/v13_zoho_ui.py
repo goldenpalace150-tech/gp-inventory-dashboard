@@ -14,7 +14,6 @@ def replace_once(text, old, new, label):
 # inventory_tracker.py
 p = ROOT / "inventory_tracker.py"
 text = p.read_text(encoding="utf-8")
-text = text.replace('initial_sidebar_state="collapsed"', 'initial_sidebar_state="expanded"', 1)
 
 insert_after = '''def export_button(name,sheets):
     # Do not keep large XLSX objects in the session across OCR scans.
@@ -119,25 +118,24 @@ old_main_header = '''    a,b,c=st.columns([5,1,1])
         elif page=="Settings":settings_page(store,token,state,stock,actor)
 '''
 
-new_main_header = '''    stamp=aware(state["updated_at"]).astimezone(store.tz).strftime("%Y-%m-%d %H:%M:%S")
-    nav=["Dashboard","Stock","Invoices","Movements","Analysis","Closing","Settings"]
-    if st.session_state.get("page") not in nav:st.session_state["page"]="Dashboard"
-    with st.sidebar:
-        st.markdown('<div class="gp-side-title">GOLDEN PALACE</div>',unsafe_allow_html=True)
-        st.caption(t("Inventory"))
-        page=st.radio(t("Inventory"),nav,format_func=t,key="page",label_visibility="collapsed")
-        st.divider()
-        st.markdown(status_html(actor,stamp),unsafe_allow_html=True)
-        if st.button(t("Refresh"),width="stretch",key="global_refresh"):
-            get_shell.clear(); get_analysis.clear(); st.rerun()
-        st.caption(actor["display_name"]+" / "+t(actor["role"]))
-        if st.button(t("Sign out"),width="stretch",key="sidebar_signout"):
+new_main_header = '''    a,b,c=st.columns([5,1,1])
+    stamp=aware(state["updated_at"]).astimezone(store.tz).strftime("%Y-%m-%d %H:%M:%S")
+    a.markdown(status_html(actor,stamp),unsafe_allow_html=True)
+    if b.button(t("Refresh"),width="stretch",key="global_refresh"):
+        get_shell.clear(); get_analysis.clear(); st.rerun()
+    with c.popover(t("Account"),width="stretch"):
+        st.write(actor["display_name"]+" / "+t(actor["role"]))
+        if st.button(t("Sign out"),width="stretch"):
             try:store.logout(token)
             finally:
                 st.session_state.clear()
                 st.rerun()
     flash=st.session_state.pop("flash",None)
     if flash:st.success(flash)
+    nav=["Dashboard","Stock","Invoices","Movements","Analysis","Closing","Settings"]
+    if st.session_state.get("page") not in nav:st.session_state["page"]="Dashboard"
+    with st.container(key="navigation"):
+        page=st.segmented_control(t("Inventory"),nav,format_func=t,key="page",label_visibility="collapsed",width="stretch") or "Dashboard"
     try:
         if page=="Dashboard":dashboard_page(store,token,state,stock,daily,actor)
         elif page=="Stock":stock_page(store,token,state,stock)
@@ -147,7 +145,7 @@ new_main_header = '''    stamp=aware(state["updated_at"]).astimezone(store.tz).s
         elif page=="Closing":closing_page(store,token,state,stock,actor)
         elif page=="Settings":settings_page(store,token,state,stock,actor)
 '''
-text = replace_once(text, old_main_header, new_main_header, "Zoho sidebar navigation")
+text = replace_once(text, old_main_header, new_main_header, "Zoho navigation")
 p.write_text(text, encoding="utf-8")
 
 
@@ -164,7 +162,7 @@ p.write_text(text, encoding="utf-8")
 p = ROOT / "assets/style.css"
 css = p.read_text(encoding="utf-8")
 if "v13: Zoho-inspired shell" not in css:
-    css += '''\n\n/* v13: Zoho-inspired shell - compact, operational, high contrast. */\n[data-testid="stSidebar"] { background:#ffffff; border-inline-end:1px solid #e3e8ef; }\n[data-testid="stSidebar"] > div:first-child { padding-top:1.1rem; }\n[data-testid="stSidebar"] [data-testid="stRadio"] label {\n  min-height:43px; border-radius:8px; padding:7px 10px; margin:2px 0; font-weight:700;\n}\n[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {\n  background:#eef4fb; color:var(--gp-blue); box-shadow:inset 3px 0 0 var(--gp-blue);\n}\n[dir="rtl"] [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {\n  box-shadow:inset -3px 0 0 var(--gp-blue);\n}\n.gp-side-title { color:var(--gp-navy); font-weight:900; letter-spacing:.08em; font-size:1rem; margin:.2rem 0 .1rem; }\n[data-testid="stMainBlockContainer"] { max-width:1540px; padding-top:2rem; }\n.gp-brand { padding:18px 24px; border-radius:14px; box-shadow:0 4px 16px #10203810; }\n.gp-brand .gp-brand-copy h1 { font-size:1.7rem; }\n.gp-logo { flex-basis:240px; padding:9px 12px; }\n.gp-logo img { max-width:240px; }\n.gp-kpis { gap:10px; }\n.gp-kpi { border-top:1px solid var(--gp-line); border-inline-start:4px solid var(--gp-blue); border-radius:10px; padding:14px 17px; box-shadow:none; }\n.gp-kpi strong { font-size:1.75rem; }\n[data-testid="stVerticalBlockBorderWrapper"] > div { border-radius:10px !important; box-shadow:none !important; }\n[data-testid="stDataFrame"] { border-radius:8px; }\n.stButton button, .stFormSubmitButton button, .stDownloadButton button { border-radius:7px; }\n[data-testid="stForm"] { border-radius:10px; box-shadow:none; }\n[data-testid="stExpander"] { border-radius:9px; }\n@media(max-width:760px) {\n  [data-testid="stSidebar"] { min-width:260px; }\n  .gp-brand { padding:14px 16px; }\n  .gp-brand .gp-brand-copy h1 { font-size:1.45rem; }\n}\n'''
+    css += '''\n\n/* v13: Zoho-inspired shell - compact, operational, high contrast. */\n[data-testid="stMainBlockContainer"] { max-width:1540px; padding-top:2rem; }\n.gp-brand { padding:18px 24px; border-radius:14px; box-shadow:0 4px 16px #10203810; }\n.gp-brand .gp-brand-copy h1 { font-size:1.7rem; }\n.gp-logo { flex-basis:240px; padding:9px 12px; }\n.gp-logo img { max-width:240px; }\n.st-key-navigation { background:#fff; padding:.45rem; border:1px solid #dfe5ec; border-radius:10px; box-shadow:none; }\n.st-key-navigation [data-testid="stButtonGroup"] > div { gap:2px; }\n.st-key-navigation button { min-height:42px; border-radius:7px; padding:.45rem .9rem; font-size:.92rem; }\n.gp-kpis { gap:10px; }\n.gp-kpi { border-top:1px solid var(--gp-line); border-inline-start:4px solid var(--gp-blue); border-radius:10px; padding:14px 17px; box-shadow:none; }\n.gp-kpi strong { font-size:1.75rem; }\n[data-testid="stVerticalBlockBorderWrapper"] > div { border-radius:10px !important; box-shadow:none !important; }\n[data-testid="stDataFrame"] { border-radius:8px; }\n.stButton button, .stFormSubmitButton button, .stDownloadButton button { border-radius:7px; }\n[data-testid="stForm"] { border-radius:10px; box-shadow:none; }\n[data-testid="stExpander"] { border-radius:9px; }\n@media(max-width:760px) {\n  .gp-brand { padding:14px 16px; }\n  .gp-brand .gp-brand-copy h1 { font-size:1.45rem; }\n  .st-key-navigation button { padding:.4rem .55rem; font-size:.82rem; }\n}\n'''
 p.write_text(css, encoding="utf-8")
 
 print("v13 Zoho-inspired UI applied")
