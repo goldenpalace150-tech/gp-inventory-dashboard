@@ -63,7 +63,7 @@ jobs:
           rows=s.recent_invoices(token)
           assert len(rows)==1 and rows[0]['total_quantity']==3.0
           hist=s.movement_history(token)
-          local=hist[hist['رقم المرجع']=='8042']
+          local=hist[hist['المرجع']=='8042']
           assert not local.empty and set(local['الزبون'])=={'Customer A'} and set(local['السائق'])=={'Driver 1'}
           print('invoice metadata + overwrite passed')
           PY
