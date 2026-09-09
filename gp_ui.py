@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v12"
+BUILD = "GP-CLOUD-v13"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -295,4 +295,15 @@ AR.update({
 AR.update({
     "Warehouse report delete hint": "الحذف متاح للمدير دون شروط. يتم حذف سجل تقرير المستودع المحدد فقط، ولا يتم تغيير الرصيد الحالي أو الحركات اللاحقة.",
     "OCR hint": "تُقرأ رموز المواد والكميات ورقم الفاتورة تلقائياً، ويحاول النظام أيضاً تحديد نوع الحركة واسم الزبون من رأس المستند عند ظهورهما بوضوح. تبقى المراجعة قبل الاعتماد إلزامية.",
+})
+
+
+# ---- v13 Zoho-inspired navigation/dashboard ----
+AR.update({
+    "Dashboard": "لوحة التحكم",
+    "Dashboard hint": "نظرة سريعة على حالة المستودع وحركة اليوم وأهم الإجراءات.",
+    "Quick actions": "إجراءات سريعة",
+    "Today's activity": "حركة اليوم",
+    "Warehouse status": "حالة المستودع",
+    "Recent invoices": "أحدث الفواتير",
 })

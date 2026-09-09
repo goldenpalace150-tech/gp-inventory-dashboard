@@ -129,6 +129,66 @@ def export_button(name,sheets):
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="download_"+name)
 
 
+def dashboard_page(store,token,state,stock,daily,actor):
+    """Zoho-inspired operational landing page: KPIs, quick actions and recent work."""
+    section("Dashboard","Dashboard hint")
+    alerts=int(daily["without_invoice"].sum()) if not daily.empty else 0
+    available=int((stock[COL_QTY]>0).sum()) if not stock.empty else 0
+    out_count=int((stock[COL_QTY]<=0).sum()) if not stock.empty else 0
+    st.markdown(kpis_html([
+        ("Items",f"{len(stock):,}","Stock"),
+        ("Available",f"{available:,}","Items"),
+        ("Movements",f"{len(daily):,}","Today"),
+        ("Without invoice",f"{alerts:,}","Today"),
+    ]),unsafe_allow_html=True)
+
+    st.markdown("### "+t("Quick actions"))
+    q1,q2,q3,q4=st.columns(4)
+    if q1.button(t("Read invoice"),type="primary",width="stretch",key="dash_invoice"):
+        st.session_state["page"]="Invoices"; st.rerun()
+    if q2.button(t("New movement"),width="stretch",key="dash_movement"):
+        st.session_state["page"]="Movements"; st.rerun()
+    if q3.button(t("Stock"),width="stretch",key="dash_stock"):
+        st.session_state["page"]="Stock"; st.rerun()
+    if q4.button(t("Analysis"),width="stretch",key="dash_analysis"):
+        st.session_state["page"]="Analysis"; st.rerun()
+
+    left,right=st.columns([1.15,1])
+    with left:
+        with st.container(border=True):
+            st.markdown("#### "+t("Today's activity"))
+            if daily.empty:
+                st.info(t("Empty"))
+            else:
+                cols=[c for c in ["created_at","movement_type","item_code","item_name","quantity","invoice_reference","username"] if c in daily.columns]
+                table(daily.tail(10)[cols].iloc[::-1],height=320)
+    with right:
+        with st.container(border=True):
+            st.markdown("#### "+t("Warehouse status"))
+            a,b=st.columns(2)
+            a.metric(t("Out of stock"),f"{out_count:,}")
+            b.metric(t("Available"),f"{available:,}")
+            if not stock.empty:
+                watch=stock.sort_values(COL_QTY,ascending=True).head(8)
+                table(visible_frame(watch),height=245)
+            else:
+                st.info(t("No stock"))
+
+    with st.container(border=True):
+        st.markdown("#### "+t("Recent invoices"))
+        posted=store.recent_invoices(token,8)
+        if posted:
+            frame=pd.DataFrame(posted)
+            frame["total_quantity"]=pd.to_numeric(frame["total_quantity"],errors="coerce").fillna(0).map(lambda x:f"{x:.1f}")
+            frame["posted_at"]=frame["posted_at"].map(lambda x:aware(x).astimezone(store.tz).strftime("%Y-%m-%d %H:%M"))
+            shown=frame[["invoice_reference","customer_name","driver","movement_type","total_quantity","posted_at"]].rename(columns={
+                "invoice_reference":t("Invoice number"),"customer_name":t("Customer name"),"driver":t("Driver"),
+                "movement_type":t("Movement type"),"total_quantity":t("Total quantity"),"posted_at":t("Date")})
+            table(shown,height=270)
+        else:
+            st.info(t("No posted invoices"))
+
+
 def stock_page(store,token,state,stock):
     section("Stock")
     if stock.empty:
@@ -621,15 +681,13 @@ def main():
                 st.rerun()
     flash=st.session_state.pop("flash",None)
     if flash:st.success(flash)
-    nav=["Stock","Invoices","Movements","Analysis","Closing","Settings"]
+    nav=["Dashboard","Stock","Invoices","Movements","Analysis","Closing","Settings"]
+    if st.session_state.get("page") not in nav:st.session_state["page"]="Dashboard"
     with st.container(key="navigation"):
-        page=st.segmented_control(t("Inventory"),nav,default="Stock",format_func=t,key="page",label_visibility="collapsed",width="stretch") or "Stock"
-    if page not in ("Analysis",):
-        alerts=int(daily["without_invoice"].sum()) if not daily.empty else 0
-        st.markdown(kpis_html([("Items",f"{len(stock):,}","Stock"),("Available",f"{int((stock[COL_QTY]>0).sum()):,}","Items"),
-                               ("Movements",len(daily),"Today"),("Without invoice",alerts,"Today")]),unsafe_allow_html=True)
+        page=st.segmented_control(t("Inventory"),nav,format_func=t,key="page",label_visibility="collapsed",width="stretch") or "Dashboard"
     try:
-        if page=="Stock":stock_page(store,token,state,stock)
+        if page=="Dashboard":dashboard_page(store,token,state,stock,daily,actor)
+        elif page=="Stock":stock_page(store,token,state,stock)
         elif page=="Invoices":invoices_page(store,token,state,stock)
         elif page=="Movements":movements_page(store,token,state,stock)
         elif page=="Analysis":analysis_page(store,token,state,stock)

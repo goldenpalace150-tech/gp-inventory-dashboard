@@ -103,3 +103,27 @@ button:focus-visible, input:focus-visible { outline:3px solid var(--gp-gold); ou
   [data-testid="stForm"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { padding:10px; }
   .gp-form-gap { height:8px; }
 }
+
+
+/* v13: Zoho-inspired shell - compact, operational, high contrast. */
+[data-testid="stMainBlockContainer"] { max-width:1540px; padding-top:2rem; }
+.gp-brand { padding:18px 24px; border-radius:14px; box-shadow:0 4px 16px #10203810; }
+.gp-brand .gp-brand-copy h1 { font-size:1.7rem; }
+.gp-logo { flex-basis:240px; padding:9px 12px; }
+.gp-logo img { max-width:240px; }
+.st-key-navigation { background:#fff; padding:.45rem; border:1px solid #dfe5ec; border-radius:10px; box-shadow:none; }
+.st-key-navigation [data-testid="stButtonGroup"] > div { gap:2px; }
+.st-key-navigation button { min-height:42px; border-radius:7px; padding:.45rem .9rem; font-size:.92rem; }
+.gp-kpis { gap:10px; }
+.gp-kpi { border-top:1px solid var(--gp-line); border-inline-start:4px solid var(--gp-blue); border-radius:10px; padding:14px 17px; box-shadow:none; }
+.gp-kpi strong { font-size:1.75rem; }
+[data-testid="stVerticalBlockBorderWrapper"] > div { border-radius:10px !important; box-shadow:none !important; }
+[data-testid="stDataFrame"] { border-radius:8px; }
+.stButton button, .stFormSubmitButton button, .stDownloadButton button { border-radius:7px; }
+[data-testid="stForm"] { border-radius:10px; box-shadow:none; }
+[data-testid="stExpander"] { border-radius:9px; }
+@media(max-width:760px) {
+  .gp-brand { padding:14px 16px; }
+  .gp-brand .gp-brand-copy h1 { font-size:1.45rem; }
+  .st-key-navigation button { padding:.4rem .55rem; font-size:.82rem; }
+}
