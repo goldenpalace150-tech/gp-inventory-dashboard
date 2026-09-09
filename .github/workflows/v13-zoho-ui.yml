@@ -28,7 +28,7 @@ jobs:
           ui=Path('gp_ui.py').read_text()
           css=Path('assets/style.css').read_text()
           assert 'def dashboard_page(' in app
-          assert 'st.radio(t("Inventory"),nav' in app
+          assert 'st.segmented_control(t("Inventory"),nav' in app
           assert '"Dashboard","Stock","Invoices"' in app
           assert 'GP-CLOUD-v13' in ui
           assert 'v13: Zoho-inspired shell' in css
