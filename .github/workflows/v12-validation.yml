@@ -1,0 +1,94 @@
+name: V12 warehouse validation
+on:
+  push:
+    branches: [warehouse-update-v12]
+    paths:
+      - 'scripts/v12_warehouse_update.py'
+      - '.github/workflows/v12-validation.yml'
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: warehouse-update-v12
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply v12 source update
+        run: python scripts/v12_warehouse_update.py
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+      - name: Compile
+        run: python -m compileall -q inventory_tracker.py gp_store.py gp_ui.py gp_core.py gp_invoice.py gp_ocr.py invoice_ocr_worker.py
+      - name: Regression suite
+        run: python -m pytest -o addopts='' -q
+      - name: Validate Arabic OCR enums and header parser
+        run: |
+          python - <<'PY'
+          from rapidocr import LangDet, LangRec, OCRVersion
+          assert hasattr(LangRec,'ARABIC'), LangRec
+          assert hasattr(LangDet,'MULTI'), LangDet
+          assert hasattr(OCRVersion,'PPOCRV5'), OCRVersion
+          from invoice_ocr_worker import parse_header_metadata
+          boxes=[
+            {'text':'مذكرة تسليم (إخراج مخازن)','score':0.95,'x':500,'y':100,'region':'header'},
+            {'text':'للسيد / محمد احمد','score':0.95,'x':400,'y':150,'region':'header'},
+          ]
+          movement,customer=parse_header_metadata(boxes,1000,1200)
+          assert movement=='OUT', movement
+          assert 'محمد' in customer, customer
+          print('Arabic OCR metadata parser passed')
+          PY
+      - name: Validate forced admin report deletion
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from gp_core import COL_CODE,COL_NAME,COL_QTY,ensure_unique_stock_keys
+          from gp_store import Store
+          s=Store.for_tests(); pw='Test-Password-2026'; s.initialize(password=pw); token=s.login('admin',pw)
+          stock1=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:'A',COL_NAME:'Item A',COL_QTY:5}]))
+          s.replace_stock(token,pw,stock1,'base1',s.state(token)['revision'],source_name='r1.xlsx')
+          k=s.stock(token).iloc[0]['مفتاح المخزون']
+          s.post(token,pw,[dict(item_key=k,movement_type='OUT',quantity=1)],'m1',reference='M1',reason='manual',delivery_note=True)
+          stock2=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:'A',COL_NAME:'Item A',COL_QTY:9}]))
+          s.replace_stock(token,pw,stock2,'base2',s.state(token)['revision'],source_name='r2.xlsx')
+          reports=s.deletion_catalog(token)['stock_reports']
+          older=reports[-1]['operation_id']
+          before=float(s.stock(token).iloc[0][COL_QTY])
+          s.delete_stock_report(token,pw,older)
+          after=float(s.stock(token).iloc[0][COL_QTY])
+          assert before==after==9.0
+          remaining={r['operation_id'] for r in s.deletion_catalog(token)['stock_reports']}
+          assert older not in remaining
+          print('force delete passed')
+          PY
+      - name: Validate v12 UI markers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import gp_ui
+          assert gp_ui.BUILD=='GP-CLOUD-v12'
+          app=Path('inventory_tracker.py').read_text()
+          assert 'result=extract_invoice_data(uploaded,stock)' in app
+          assert 'result["movement_type"]=""' not in app
+          css=Path('assets/style.css').read_text()
+          assert 'v12: accessible form cells' in css
+          assert '[data-testid="stColumn"]' in css
+          print('UI markers passed')
+          PY
+      - name: Commit validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add requirements.txt inventory_tracker.py gp_store.py gp_ui.py gp_ocr.py invoice_ocr_worker.py assets/style.css
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+          else
+            git commit -m 'feat: accessible forms invoice metadata OCR and force report delete'
+            git push origin HEAD:warehouse-update-v12
+          fi
