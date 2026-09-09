@@ -79,3 +79,8 @@ button:focus-visible, input:focus-visible { outline:3px solid var(--gp-gold); ou
 .gp-loading-card strong { color:var(--gp-ink); font-size:1rem; }
 @keyframes gp-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .gp-loading-ring { animation-duration:1.8s; } }
+
+
+/* v11: visual separation between logical form groups without extra bordered cards. */
+.gp-form-gap { height: 22px; width: 100%; }
+@media (max-width: 800px) { .gp-form-gap { height: 14px; } }

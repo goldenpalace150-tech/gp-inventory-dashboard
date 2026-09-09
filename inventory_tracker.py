@@ -168,95 +168,116 @@ def invoices_page(store,token,state,stock):
                 st.session_state["selected_draft_id"]=store.create_draft(token,source_name=t("Manual invoice"))
                 st.rerun()
             if read:
-                content=uploaded.getvalue()
-                image_hash=hashlib.sha256(content).hexdigest()
-                # Persist the draft identity before starting a potentially failing model.
+                content=uploaded.getvalue(); image_hash=hashlib.sha256(content).hexdigest()
                 draft_id=store.create_draft(token,source_name=uploaded.name,image_hash=image_hash)
                 st.session_state["selected_draft_id"]=draft_id
                 pending={d["draft_id"]:d for d in store.drafts(token)}
                 if draft_id not in pending:
                     st.warning(t("This invoice or image was already posted"))
                 elif pending[draft_id]["payload"].get("items"):
-                    st.info("This image already has a saved draft. Review it below; OCR was not repeated.")
+                    st.info(t("Saved invoice draft found"))
                 else:
                     with branded_wait("Reading"):
                         try:
-                            result=extract_invoice_data(uploaded,stock)
-                            result["movement_type"]=""  # the numeric reader cannot determine direction
+                            result=extract_invoice_data(uploaded,stock); result["movement_type"]=""
+                            result.setdefault("customer_name",""); result.setdefault("driver","")
                             store.save_draft(token,draft_id,result,pending[draft_id]["version"])
                             success(message="Saved")
                         except Exception as error:
-                            # Worker messages are bounded; the worker has no database credentials in its logs.
-                            if isinstance(error,(RuntimeError,ValueError)):
-                                st.error(str(error)[:1000])
+                            if isinstance(error,(RuntimeError,ValueError)):st.error(str(error)[:1000])
                             else:show_error(error)
         with right:
-            if uploaded:
-                st.image(uploaded.getvalue(),width="stretch")
-            else:
-                st.markdown(section_html("Review","Draft hint"),unsafe_allow_html=True)
+            if uploaded:st.image(uploaded.getvalue(),width="stretch")
+            else:st.markdown(section_html("Review","Draft hint"),unsafe_allow_html=True)
+
     section("Drafts")
     drafts=store.drafts(token)
-    if not drafts:
-        st.info(t("No drafts"));return
-    choices={d["draft_id"]:d for d in drafts}
-    selected=st.session_state.get("selected_draft_id")
-    if selected not in choices:selected=drafts[0]["draft_id"]
-    selected=st.selectbox(t("Drafts"),list(choices),index=list(choices).index(selected),
-        format_func=lambda k: (choices[k]["payload"].get("invoice_number") or choices[k]["source_name"] or k[:8])+" / "+choices[k]["username"],
-        key="draft_selector")
-    st.session_state["selected_draft_id"]=selected
-    draft=choices[selected];payload=draft["payload"]
-    # Versioned widget identity prevents stale edits from overwriting a newer revision.
-    suffix=selected+"_"+str(draft["version"])
-    for message in payload.get("warnings",[])[:6]:st.warning(str(message))
-    st.caption(t("Draft hint"))
-    rows=payload.get("items") or []
-    try:
-        rows, ignored_saved = canonicalize_invoice_rows(rows, stock, drop_unknown=True)
-    except AppError:
-        rows, ignored_saved = [], []
-    if ignored_saved:
-        st.warning(t("Ignored non-item numbers")+": "+", ".join(ignored_saved[:8]))
-    rows=rows or [{"item_code":"","item_name":"","quantity":None}]
-    frame=pd.DataFrame(rows)[["item_code","item_name","quantity"]]
-    frame["item_code"]=frame["item_code"].fillna("").astype(str)
-    frame["item_name"]=frame["item_name"].fillna("").astype(str)
-    frame["quantity"]=pd.to_numeric(frame["quantity"],errors="coerce")
-    with st.form("review_"+suffix):
-        a,b=st.columns([1.3,1])
-        reference=a.text_input(t("Reference"),value=str(payload.get("invoice_number", "")),key="reference_"+suffix)
-        kinds=["","OUT","IN"]
-        kind=b.selectbox(t("Movement type"),kinds,index=kinds.index(payload.get("movement_type","")) if payload.get("movement_type","") in kinds else 0,
-                         format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
-        edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,disabled=["item_name"],
-            column_config={"item_code":st.column_config.TextColumn(COL_CODE),"item_name":st.column_config.TextColumn(COL_NAME),
-                           "quantity":st.column_config.NumberColumn(COL_QTY,min_value=0,format="%.4f")})
-        review_checked=st.checkbox(t("Confirm review"),key="checked_"+suffix)
-        password=st.text_input(t("Approval password"),type="password",key="password_invoice_"+suffix)
-        a,b=st.columns(2)
-        save=a.form_submit_button(t("Save draft"),width="stretch")
-        post=b.form_submit_button(t("Post invoice"),type="primary",width="stretch")
-        if save or post:
-            try:
-                canonical_rows, _ = canonicalize_invoice_rows(edited.to_dict("records"), stock, drop_unknown=False)
-                updated=dict(payload)
-                updated.update(invoice_number=reference.strip(),movement_type=kind,
-                               items=clean_json(canonical_rows))
-                if save:
-                    store.save_draft(token,selected,updated,draft["version"])
-                    success()
-                else:
-                    if not review_checked:raise AppError("Confirm review")
-                    changes=match_invoice_lines(updated["items"],store.stock(token),kind)
-                    store.post(token,password,changes,nonce("invoice_"+selected),source="INVOICE",reference=reference,
-                        image_hash=draft["image_hash"],reason=t("Invoices"),delivery_note=True,reviewed=updated,draft_id=selected,expected_draft_version=draft["version"])
-                    success("invoice_"+selected)
-            except Exception as error:show_error(error)
-    with st.expander(t("Discard")):
-        discard_ok=st.checkbox(t("Discard"),key="discard_check_"+suffix)
-        if st.button(t("Discard"),disabled=not discard_ok,key="discard_"+suffix):
-            store.discard_draft(token,selected);success()
+    if drafts:
+        choices={d["draft_id"]:d for d in drafts}
+        selected=st.session_state.get("selected_draft_id")
+        if selected not in choices:selected=drafts[0]["draft_id"]
+        selected=st.selectbox(t("Drafts"),list(choices),index=list(choices).index(selected),
+            format_func=lambda k: (choices[k]["payload"].get("invoice_number") or choices[k]["source_name"] or k[:8])+" / "+choices[k]["username"],
+            key="draft_selector")
+        st.session_state["selected_draft_id"]=selected
+        draft=choices[selected];payload=draft["payload"];suffix=selected+"_"+str(draft["version"])
+        for message in payload.get("warnings",[])[:6]:st.warning(str(message))
+        st.caption(t("Draft hint"))
+        rows=payload.get("items") or []
+        try:rows,ignored_saved=canonicalize_invoice_rows(rows,stock,drop_unknown=True)
+        except AppError:rows,ignored_saved=[],[]
+        if ignored_saved:st.warning(t("Ignored non-item numbers")+": "+", ".join(ignored_saved[:8]))
+        rows=rows or [{"item_code":"","item_name":"","quantity":None}]
+        frame=pd.DataFrame(rows)[["item_code","item_name","quantity"]]
+        frame["item_code"]=frame["item_code"].fillna("").astype(str)
+        frame["item_name"]=frame["item_name"].fillna("").astype(str)
+        frame["quantity"]=pd.to_numeric(frame["quantity"],errors="coerce")
+        with st.form("review_"+suffix):
+            st.markdown("#### "+t("Invoice details"))
+            a,b,c,d=st.columns([1.15,1.5,1.15,1])
+            reference=a.text_input(t("Reference"),value=str(payload.get("invoice_number","")),key="reference_"+suffix)
+            customer=b.text_input(t("Customer name"),value=str(payload.get("customer_name","")),key="customer_"+suffix)
+            driver=c.text_input(t("Driver"),value=str(payload.get("driver","")),key="driver_"+suffix)
+            kinds=["","OUT","IN"]
+            current_kind=payload.get("movement_type","") if payload.get("movement_type","") in kinds else ""
+            kind=d.selectbox(t("Movement type"),kinds,index=kinds.index(current_kind),format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
+            st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
+            edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,disabled=["item_name"],
+                column_config={"item_code":st.column_config.TextColumn(COL_CODE),"item_name":st.column_config.TextColumn(COL_NAME),
+                               "quantity":st.column_config.NumberColumn(COL_QTY,min_value=0,step=0.1,format="%.1f")})
+            total=float(pd.to_numeric(edited["quantity"],errors="coerce").fillna(0).sum())
+            st.caption(f"{t('Items')}: {len(edited)}   |   {t('Total quantity')}: {total:.1f}")
+            st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
+            duplicate_action=st.selectbox(t("Duplicate action"),["ignore","overwrite"],format_func=lambda x:t("Ignore duplicate" if x=="ignore" else "Overwrite if changed"),key="duplicate_"+suffix)
+            st.caption(t("Duplicate invoice hint"))
+            review_checked=st.checkbox(t("Confirm review"),key="checked_"+suffix)
+            password=st.text_input(t("Approval password"),type="password",key="password_invoice_"+suffix)
+            a,b=st.columns(2)
+            save=a.form_submit_button(t("Save draft"),width="stretch")
+            post=b.form_submit_button(t("Post invoice"),type="primary",width="stretch")
+            if save or post:
+                try:
+                    canonical_rows,_=canonicalize_invoice_rows(edited.to_dict("records"),stock,drop_unknown=False)
+                    updated=dict(payload);updated.update(invoice_number=reference.strip(),movement_type=kind,
+                        customer_name=customer.strip(),driver=driver.strip(),items=clean_json(canonical_rows))
+                    if save:
+                        store.save_draft(token,selected,updated,draft["version"]);success()
+                    else:
+                        if not review_checked:raise AppError("Confirm review")
+                        changes=match_invoice_lines(updated["items"],store.stock(token),kind)
+                        duplicate=store.invoice_duplicate(token,reference,changes,updated)
+                        if duplicate.get("exists"):
+                            if duplicate.get("identical") or duplicate_action=="ignore":
+                                store.discard_draft(token,selected);success(message="Duplicate ignored")
+                            else:
+                                store.replace_invoice(token,password,changes,nonce("invoice_update_"+selected),reference=reference,
+                                    image_hash=draft["image_hash"],reviewed=updated,draft_id=selected,expected_draft_version=draft["version"],
+                                    customer_name=customer,driver=driver)
+                                success("invoice_update_"+selected,message="Invoice updated")
+                        else:
+                            store.post(token,password,changes,nonce("invoice_"+selected),source="INVOICE",reference=reference,
+                                image_hash=draft["image_hash"],reason=t("Invoices"),delivery_note=True,reviewed=updated,draft_id=selected,
+                                expected_draft_version=draft["version"],customer_name=customer,driver=driver)
+                            success("invoice_"+selected)
+                except Exception as error:show_error(error)
+        with st.expander(t("Discard")):
+            discard_ok=st.checkbox(t("Discard"),key="discard_check_"+suffix)
+            if st.button(t("Discard"),disabled=not discard_ok,key="discard_"+suffix):
+                store.discard_draft(token,selected);success()
+    else:
+        st.info(t("No drafts"))
+
+    section("Posted invoices")
+    posted=store.recent_invoices(token,100)
+    if posted:
+        history=pd.DataFrame(posted)
+        history["total_quantity"]=pd.to_numeric(history["total_quantity"],errors="coerce").fillna(0).map(lambda x:f"{x:.1f}")
+        history["posted_at"]=history["posted_at"].map(lambda x:aware(x).astimezone(store.tz).strftime("%Y-%m-%d %H:%M"))
+        shown=history[["invoice_reference","customer_name","driver","movement_type","line_count","total_quantity","posted_at","username"]].rename(columns={
+            "invoice_reference":t("Invoice number"),"customer_name":t("Customer name"),"driver":t("Driver"),"movement_type":t("Movement type"),
+            "line_count":t("Items"),"total_quantity":t("Total quantity"),"posted_at":t("Date"),"username":t("Username")})
+        table(shown,height=320)
+    else:st.info(t("No posted invoices"))
 
 
 def movements_page(store,token,state,stock):
@@ -270,11 +291,13 @@ def movements_page(store,token,state,stock):
         a,b=st.columns([3,1])
         indexed=stock.set_index(COL_KEY)
         item=a.selectbox(t("Item"),indexed.index.tolist(),format_func=lambda k:f"{indexed.at[k,COL_CODE]} | {indexed.at[k,COL_NAME]}")
-        qty=b.number_input(t("Quantity"),min_value=0.0,step=1.0,format="%.4f")
+        qty=b.number_input(t("Quantity"),min_value=0.0,step=1.0,format="%.1f")
+        st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
         a,b=st.columns(2)
         reference=a.text_input(t("Reference optional"))
         reason=b.text_input(t("Reason"))
         delivered=st.checkbox(t("Delivery confirmed")) if kind=="OUT" else False
+        st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
         password=st.text_input(t("Approval password"),type="password",key="password_manual_"+request)
         if st.form_submit_button(t("Post movement"),type="primary",width="stretch"):
             try:
@@ -471,10 +494,12 @@ def settings_page(store,token,state,stock,actor):
                 safety=b.number_input(t("Safety days"),min_value=0,max_value=365,value=int(settings["safety_days"]))
                 slow=c.number_input(t("Slow days"),min_value=30,max_value=730,value=int(settings["slow_days"]))
                 st.divider()
+                st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
                 a,b=st.columns(2)
                 demand=a.number_input(t("Demand days"),min_value=7,max_value=730,value=int(settings["demand_window_days"]))
                 review=b.number_input(t("Review days"),min_value=1,max_value=365,value=int(settings["review_days"]))
                 st.divider()
+                st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
                 prefixes=st.text_input(t("Purchase prefixes"),value=", ".join(settings["purchase_prefixes"]))
                 st.divider()
                 password=st.text_input(t("Approval password"),type="password",key="password_settings")

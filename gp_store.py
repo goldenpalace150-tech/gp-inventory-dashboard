@@ -496,36 +496,70 @@ class Store:
             if state["history_as_of"]:
                 query=query.where(l.c.created_at>state["history_as_of"])
             local=c.execute(query.order_by(l.c.ledger_id)).mappings().all()
+            op_ids=sorted({r["operation_id"] for r in local})
+            details_by_op={}
+            if op_ids:
+                o=self.tables["operations"]
+                details_by_op={r["operation_id"]:(r["details"] if isinstance(r["details"],dict) else {})
+                               for r in c.execute(select(o.c.operation_id,o.c.details).where(o.c.operation_id.in_(op_ids))).mappings().all()}
         result=[]
         for r in rows:
             result.append({COL_CODE:r["item_code"],COL_NAME:r["item_name"],COL_DATE:aware(r["movement_date"]).astimezone(self.tz).replace(tzinfo=None),
                 COL_REF:r["reference"],COL_CUSTOMER:r["customer"],COL_IN:float(r["qty_in"]),COL_OUT:float(r["qty_out"]),
-                COL_BAL:None if r["balance"] is None else float(r["balance"]),COL_USER:r["username"],COL_NOTE:r["statement"],COL_MATCH:r["match_key"]})
+                COL_BAL:None if r["balance"] is None else float(r["balance"]),COL_USER:r["username"],COL_NOTE:r["statement"],
+                COL_MATCH:r["match_key"],"السائق":""})
         for r in local:
+            meta=details_by_op.get(r["operation_id"],{})
             result.append({COL_CODE:r["item_code"],COL_NAME:r["item_name"],COL_DATE:aware(r["created_at"]).astimezone(self.tz).replace(tzinfo=None),
-                COL_REF:r["invoice_reference"],COL_CUSTOMER:"",COL_IN:float(r["quantity"]) if r["movement_type"]=="IN" else 0,
+                COL_REF:r["invoice_reference"],COL_CUSTOMER:str(meta.get("customer_name","") or ""),COL_IN:float(r["quantity"]) if r["movement_type"]=="IN" else 0,
                 COL_OUT:float(r["quantity"]) if r["movement_type"]=="OUT" else 0,COL_BAL:float(r["quantity_after"]),
-                COL_USER:r["username"],COL_NOTE:r["reason"],COL_MATCH:item_link_key(r["item_code"],r["item_name"])})
+                COL_USER:r["username"],COL_NOTE:r["reason"],COL_MATCH:item_link_key(r["item_code"],r["item_name"]),
+                "السائق":str(meta.get("driver","") or "")})
         return pd.DataFrame(result)
 
-    def post(self, token, password, changes, request_key, *, source="MANUAL", reference="", image_hash=None,
-             reason="", delivery_note=False, reviewed=None, draft_id=None, expected_draft_version=None):
-        if source not in ("MANUAL","INVOICE") or not changes:
+    @staticmethod
+    def _normalize_changes(changes):
+        if not changes:
             raise AppError("No valid movement lines")
-        reference=str(reference).strip()
-        if len(reference)>160:raise AppError("Reference is too long")
-        if source=="INVOICE" and not reference:raise AppError("Invoice reference is required")
-        if source=="MANUAL" and not str(reason).strip():raise AppError("A movement reason is required")
         grouped={}
         for r in changes:
-            if r["movement_type"] not in ("IN","OUT"):raise AppError("Select IN or OUT")
+            if r["movement_type"] not in ("IN","OUT"):
+                raise AppError("Select IN or OUT")
             qty=decimal_qty(r["quantity"],positive=True)
             key=(str(r["item_key"]),r["movement_type"])
             grouped[key]=grouped.get(key,Decimal(0))+qty
-        normalized=[dict(item_key=k,movement_type=d,quantity=decimal_qty(q,positive=True)) for (k,d),q in sorted(grouped.items())]
+        return [dict(item_key=k,movement_type=d,quantity=decimal_qty(q,positive=True))
+                for (k,d),q in sorted(grouped.items())]
+
+    @staticmethod
+    def _line_signature(rows):
+        unit=Decimal("0.0001")
+        return sorted((str(r["item_key"]),str(r["movement_type"]),str(decimal_qty(r["quantity"]).quantize(unit))) for r in rows)
+
+    @staticmethod
+    def _review_payload(reviewed, customer_name="", driver=""):
+        payload=dict(reviewed) if isinstance(reviewed,dict) else {}
+        payload["customer_name"]=str(customer_name or "").strip()
+        payload["driver"]=str(driver or "").strip()
+        return clean_json(payload)
+
+    def post(self, token, password, changes, request_key, *, source="MANUAL", reference="", image_hash=None,
+             reason="", delivery_note=False, reviewed=None, draft_id=None, expected_draft_version=None,
+             customer_name="", driver=""):
+        if source not in ("MANUAL","INVOICE"):
+            raise AppError("No valid movement lines")
+        normalized=self._normalize_changes(changes)
+        reference=str(reference).strip(); customer_name=str(customer_name or "").strip(); driver=str(driver or "").strip()
+        if len(reference)>160:raise AppError("Reference is too long")
+        if len(customer_name)>180:raise AppError("Customer name is too long")
+        if len(driver)>120:raise AppError("Driver name is too long")
+        if source=="INVOICE" and not reference:raise AppError("Invoice reference is required")
+        if source=="MANUAL" and not str(reason).strip():raise AppError("A movement reason is required")
         if source=="MANUAL" and any(r["movement_type"]=="OUT" for r in normalized) and not delivery_note:
             raise AppError("Confirm the delivery note before stock OUT")
-        data=dict(lines=normalized,reference=reference,image_hash=image_hash,reason=reason,delivery_note=bool(delivery_note),draft_id=draft_id)
+        review_payload=self._review_payload(reviewed,customer_name,driver)
+        data=dict(lines=normalized,reference=reference,image_hash=image_hash,reason=reason,delivery_note=bool(delivery_note),
+                  draft_id=draft_id,customer_name=customer_name,driver=driver)
         with self.engine.begin() as c:
             actor,op,again,fp=self._operation(c,token,password,request_key,source,data)
             if again:return op
@@ -556,18 +590,147 @@ class Store:
                     movement_type=line["movement_type"],item_key=r["item_key"],item_code=r["item_code"],item_name=r["item_name"],quantity=line["quantity"],
                     quantity_before=before,quantity_after=after,invoice_reference=reference,without_invoice=not bool(reference),
                     delivery_note=bool(delivery_note),reason=str(reason)))
-            # Updates, ledger, duplicate register and draft status share one commit.
-            self._record_operation(c,actor,op,request_key,source,fp,{"reference":reference,"lines":len(ledger)})
+            details={"reference":reference,"lines":len(ledger),"customer_name":customer_name,"driver":driver}
+            self._record_operation(c,actor,op,request_key,source,fp,details)
             c.execute(insert(self.tables["movement_ledger"]),ledger)
             for key,r in balances.items():
                 c.execute(update(t).where(t.c.item_key==key).values(quantity=r["quantity"],updated_at=now))
             if source=="INVOICE":
                 c.execute(insert(inv).values(invoice_reference=reference,image_hash=image_hash,operation_id=op,posted_at=now,
-                    username=actor["username"],recognized_json=clean_json(reviewed or {})))
+                    username=actor["username"],recognized_json=review_payload))
             if draft_id:
                 d=self.tables["invoice_drafts"]
                 c.execute(update(d).where(d.c.draft_id==draft_id).values(status="posted",updated_at=now,version=d.c.version+1))
             return op
+
+    def invoice_duplicate(self,token,reference,changes,reviewed=None):
+        reference=str(reference or "").strip()
+        if not reference:return {"exists":False,"identical":False}
+        normalized=self._normalize_changes(changes)
+        new_payload=reviewed if isinstance(reviewed,dict) else {}
+        with self.engine.connect() as c:
+            self._actor(c,token); inv=self.tables["posted_invoices"]
+            row=c.execute(select(inv).where(inv.c.invoice_reference==reference)).mappings().first()
+            if not row:return {"exists":False,"identical":False}
+            l=self.tables["movement_ledger"]
+            lines=c.execute(select(l).where(l.c.operation_id==row["operation_id"]).order_by(l.c.line_no)).mappings().all()
+            old_payload=row["recognized_json"] if isinstance(row["recognized_json"],dict) else {}
+        same_lines=self._line_signature(lines)==self._line_signature(normalized)
+        same_meta=(str(old_payload.get("customer_name","") or "").strip()==str(new_payload.get("customer_name","") or "").strip()
+                   and str(old_payload.get("driver","") or "").strip()==str(new_payload.get("driver","") or "").strip())
+        return {"exists":True,"identical":bool(same_lines and same_meta),"operation_id":row["operation_id"],
+                "posted_at":row["posted_at"],"customer_name":str(old_payload.get("customer_name","") or ""),
+                "driver":str(old_payload.get("driver","") or "")}
+
+    def _reverse_invoice_balances_tx(self,c,operation_id):
+        operations=self.tables["operations"]; ledger=self.tables["movement_ledger"]
+        old=c.execute(select(operations).where(operations.c.operation_id==str(operation_id)).with_for_update()).mappings().first()
+        if not old or old["source"]!="INVOICE":raise AppError("Record not found")
+        day=self.today()
+        if old["business_date"]!=day:raise AppError("Only today's invoices can be updated")
+        self._open_day(c,day)
+        target=c.execute(select(ledger).where(ledger.c.operation_id==old["operation_id"]).order_by(ledger.c.ledger_id).with_for_update()).mappings().all()
+        if not target:raise AppError("Record not found")
+        max_target=max(r["ledger_id"] for r in target); deltas={}
+        for row in target:
+            key=row["item_key"]
+            delta=row["quantity"] if row["movement_type"]=="OUT" else -row["quantity"]
+            deltas[key]=deltas.get(key,Decimal(0))+delta
+        stock=self.tables["stock_state"]
+        stock_rows=c.execute(select(stock).where(stock.c.item_key.in_(list(deltas))).order_by(stock.c.item_key).with_for_update()).mappings().all()
+        current={r["item_key"]:dict(r) for r in stock_rows}
+        if set(current)!=set(deltas):raise AppError("An item is missing from the current stock")
+        now=utcnow()
+        for key,delta in deltas.items():
+            new_current=decimal_qty(current[key]["quantity"])+delta
+            if new_current<0:raise AppError("Cannot update because later movements depend on this quantity")
+            subsequent=c.execute(select(ledger).where(ledger.c.item_key==key,ledger.c.ledger_id>max_target).order_by(ledger.c.ledger_id).with_for_update()).mappings().all()
+            for row in subsequent:
+                new_before=decimal_qty(row["quantity_before"])+delta; new_after=decimal_qty(row["quantity_after"])+delta
+                if new_before<0 or new_after<0:raise AppError("Cannot update because later movements depend on this quantity")
+                c.execute(update(ledger).where(ledger.c.ledger_id==row["ledger_id"]).values(quantity_before=new_before,quantity_after=new_after))
+            c.execute(update(stock).where(stock.c.item_key==key).values(quantity=new_current,updated_at=now))
+        return dict(old),[dict(r) for r in target]
+
+    def replace_invoice(self,token,password,changes,request_key,*,reference,image_hash=None,reviewed=None,
+                        draft_id=None,expected_draft_version=None,customer_name="",driver=""):
+        normalized=self._normalize_changes(changes)
+        reference=str(reference or "").strip(); customer_name=str(customer_name or "").strip(); driver=str(driver or "").strip()
+        if not reference:raise AppError("Invoice reference is required")
+        if len(reference)>160 or len(customer_name)>180 or len(driver)>120:raise AppError("Invoice details are too long")
+        review_payload=self._review_payload(reviewed,customer_name,driver)
+        data=dict(lines=normalized,reference=reference,image_hash=image_hash,draft_id=draft_id,
+                  customer_name=customer_name,driver=driver,overwrite=True)
+        with self.engine.begin() as c:
+            actor,op,again,fp=self._operation(c,token,password,request_key,"INVOICE",data)
+            if again:return op
+            inv=self.tables["posted_invoices"]
+            previous=c.execute(select(inv).where(inv.c.invoice_reference==reference).with_for_update()).mappings().first()
+            if not previous:raise AppError("Record not found")
+            if image_hash:
+                clash=c.execute(select(inv.c.invoice_reference).where(inv.c.image_hash==image_hash,inv.c.invoice_reference!=reference)).first()
+                if clash:raise AppError("This image was already posted under another invoice number")
+            if draft_id:
+                d=self._owned_draft(c,actor,draft_id)
+                if d["status"]!="pending":raise AppError("This draft is no longer pending")
+                if expected_draft_version is None or d["version"]!=expected_draft_version:
+                    raise AppError("Draft changed in another window. Reload it")
+            old_op,old_lines=self._reverse_invoice_balances_tx(c,previous["operation_id"])
+            ledger=self.tables["movement_ledger"]; operations=self.tables["operations"]
+            c.execute(delete(inv).where(inv.c.invoice_reference==reference))
+            c.execute(delete(ledger).where(ledger.c.operation_id==previous["operation_id"]))
+            c.execute(delete(operations).where(operations.c.operation_id==previous["operation_id"]))
+            day=self.today(); t=self.tables["stock_state"]
+            keys=[r["item_key"] for r in normalized]
+            locked=c.execute(select(t).where(t.c.item_key.in_(keys)).order_by(t.c.item_key).with_for_update()).mappings().all()
+            balances={r["item_key"]:dict(r) for r in locked}
+            if set(keys)!=set(balances):raise AppError("An item is missing from the current stock")
+            now=utcnow(); new_ledger=[]
+            for n,line in enumerate(normalized,1):
+                r=balances[line["item_key"]]; before=decimal_qty(r["quantity"])
+                after=before+line["quantity"] if line["movement_type"]=="IN" else before-line["quantity"]
+                decimal_qty(after)
+                if line["movement_type"]=="OUT" and after<0:raise AppError("Insufficient stock: "+r["item_code"]+" "+r["item_name"])
+                r["quantity"]=after
+                new_ledger.append(dict(operation_id=op,line_no=n,created_at=now,business_date=day,username=actor["username"],source="INVOICE",
+                    movement_type=line["movement_type"],item_key=r["item_key"],item_code=r["item_code"],item_name=r["item_name"],quantity=line["quantity"],
+                    quantity_before=before,quantity_after=after,invoice_reference=reference,without_invoice=False,delivery_note=True,reason="Invoices"))
+            details={"reference":reference,"lines":len(new_ledger),"customer_name":customer_name,"driver":driver,
+                     "overwritten_from":previous["operation_id"]}
+            self._record_operation(c,actor,op,request_key,"INVOICE",fp,details)
+            c.execute(insert(ledger),new_ledger)
+            for key,r in balances.items():c.execute(update(t).where(t.c.item_key==key).values(quantity=r["quantity"],updated_at=now))
+            c.execute(insert(inv).values(invoice_reference=reference,image_hash=image_hash,operation_id=op,posted_at=now,
+                username=actor["username"],recognized_json=review_payload))
+            if draft_id:
+                drafts=self.tables["invoice_drafts"]
+                c.execute(update(drafts).where(drafts.c.draft_id==draft_id).values(status="posted",updated_at=now,version=drafts.c.version+1))
+            self._audit(c,actor["username"],"UPDATE_INVOICE",{"invoice_reference":reference,
+                "old_operation_id":previous["operation_id"],"new_operation_id":op,"old_lines":len(old_lines),"new_lines":len(new_ledger),
+                "customer_name":customer_name,"driver":driver})
+            return op
+
+    def recent_invoices(self,token,limit=100):
+        limit=max(1,min(500,int(limit)))
+        with self.engine.connect() as c:
+            self._actor(c,token); inv=self.tables["posted_invoices"]
+            invoices=c.execute(select(inv).order_by(inv.c.posted_at.desc()).limit(limit)).mappings().all()
+            op_ids=[r["operation_id"] for r in invoices]
+            ledger=self.tables["movement_ledger"]; operations=self.tables["operations"]
+            lines=c.execute(select(ledger).where(ledger.c.operation_id.in_(op_ids)).order_by(ledger.c.ledger_id)).mappings().all() if op_ids else []
+            op_rows=c.execute(select(operations.c.operation_id,operations.c.details).where(operations.c.operation_id.in_(op_ids))).mappings().all() if op_ids else []
+        by_op={}; details={r["operation_id"]:(r["details"] if isinstance(r["details"],dict) else {}) for r in op_rows}
+        for line in lines:by_op.setdefault(line["operation_id"],[]).append(line)
+        result=[]
+        for row in invoices:
+            items=by_op.get(row["operation_id"],[]); meta=details.get(row["operation_id"],{})
+            recognized=row["recognized_json"] if isinstance(row["recognized_json"],dict) else {}
+            kinds=sorted({x["movement_type"] for x in items})
+            result.append({"invoice_reference":row["invoice_reference"],"customer_name":str(recognized.get("customer_name",meta.get("customer_name","")) or ""),
+                "driver":str(recognized.get("driver",meta.get("driver","")) or ""),"movement_type":kinds[0] if len(kinds)==1 else " / ".join(kinds),
+                "line_count":len(items),"total_quantity":float(sum((decimal_qty(x["quantity"]) for x in items),Decimal(0))),
+                "posted_at":row["posted_at"],"username":row["username"],"operation_id":row["operation_id"]})
+        return result
 
     def _owned_draft(self,c,actor,draft_id):
         t=self.tables["invoice_drafts"]
@@ -582,7 +745,11 @@ class Store:
             self._lock(c); actor=self._actor(c,token); t=self.tables["invoice_drafts"]
             if image_hash:
                 previous=c.execute(select(t).where(t.c.username==actor["username"],t.c.image_hash==image_hash)).mappings().first()
-                if previous:return previous["draft_id"]
+                if previous:
+                    if previous["status"]!="pending":
+                        c.execute(update(t).where(t.c.draft_id==previous["draft_id"]).values(status="pending",updated_at=now,version=t.c.version+1))
+                        self._touch(c)
+                    return previous["draft_id"]
             draft_id=str(uuid.uuid4())
             c.execute(insert(t).values(draft_id=draft_id,username=actor["username"],image_hash=image_hash,
                 source_name=str(source_name)[:240],payload=clean_json(payload or {"invoice_number":"","movement_type":"","items":[]}),
@@ -650,8 +817,12 @@ class Store:
             total=sum((decimal_qty(r["quantity"]) for r in lines),Decimal(0))
             if op["source"]=="INVOICE":
                 inv=invoices_by_op.get(op["operation_id"],{})
+                meta=op["details"] if isinstance(op["details"],dict) else {}
+                recognized=inv.get("recognized_json",{}) if isinstance(inv.get("recognized_json",{}),dict) else {}
                 invoices.append(dict(operation_id=op["operation_id"],invoice_reference=inv.get("invoice_reference", ""),
                     created_at=op["created_at"],username=op["username"],line_count=len(lines),quantity=float(total),
+                    customer_name=str(recognized.get("customer_name",meta.get("customer_name","")) or ""),
+                    driver=str(recognized.get("driver",meta.get("driver","")) or ""),
                     items=[dict(item_code=r["item_code"],item_name=r["item_name"],movement_type=r["movement_type"],quantity=float(r["quantity"])) for r in lines]))
             else:
                 first=lines[0] if lines else {}

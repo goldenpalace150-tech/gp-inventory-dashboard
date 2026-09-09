@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v5"
+BUILD = "GP-CLOUD-v11"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -150,7 +150,7 @@ def section_html(title,note=""):
     return f'<div class="gp-section" dir="rtl"><h2>{html.escape(t(title))}</h2><p>{html.escape(t(note))}</p></div>'
 
 # ---- v6 bilingual / branded waiting helpers ----
-BUILD = "GP-CLOUD-v10"
+BUILD = "GP-CLOUD-v11"
 LANGUAGE = "ar"
 AR.update({
     "Language": "اللغة", "Arabic": "العربية", "English": "English",
@@ -263,4 +263,29 @@ AR.update({
     "Only the latest warehouse report can be deleted": "يمكن حذف أحدث تقرير مستودع فقط.",
     "Delete later movements before deleting this warehouse report": "احذف الحركات اللاحقة أولاً قبل حذف تقرير المستودع.",
     "A closed day depends on this warehouse report": "لا يمكن حذف التقرير لأن يوماً مقفلاً يعتمد عليه.",
+})
+
+
+# ---- v11 invoice workflow / warehouse update ----
+AR.update({
+    "Invoice details": "تفاصيل الفاتورة",
+    "Invoice number": "رقم الفاتورة",
+    "Customer name": "اسم الزبون",
+    "Driver": "السائق",
+    "Total quantity": "إجمالي الكمية",
+    "Duplicate action": "عند تكرار رقم الفاتورة",
+    "Ignore duplicate": "تجاهل المكرر",
+    "Overwrite if changed": "تحديث إذا تغيرت البنود",
+    "Duplicate invoice hint": "إذا كان رقم الفاتورة موجوداً: يتم تجاهله عند التطابق، أو يمكن تحديثه بأمان عند تعديل البنود أو الكميات.",
+    "Duplicate ignored": "الفاتورة موجودة مسبقاً ولم يتم إنشاء حركة جديدة.",
+    "Invoice updated": "تم تحديث الفاتورة وإعادة احتساب أثرها على المستودع.",
+    "Posted invoices": "الفواتير المعتمدة",
+    "No posted invoices": "لا توجد فواتير معتمدة.",
+    "Saved invoice draft found": "تم العثور على مسودة محفوظة لهذه الصورة. راجعها أدناه.",
+    "Customer name is too long": "اسم الزبون طويل جداً.",
+    "Driver name is too long": "اسم السائق طويل جداً.",
+    "Invoice details are too long": "إحدى بيانات الفاتورة طويلة جداً.",
+    "Only today's invoices can be updated": "يمكن تحديث فواتير اليوم المفتوح فقط.",
+    "Cannot update because later movements depend on this quantity": "لا يمكن تحديث الفاتورة لأن حركات لاحقة تعتمد على هذه الكمية.",
+    "This image was already posted under another invoice number": "تم اعتماد هذه الصورة سابقاً تحت رقم فاتورة آخر.",
 })
