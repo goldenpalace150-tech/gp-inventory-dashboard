@@ -1,0 +1,71 @@
+name: V12 warehouse validation 3
+on:
+  push:
+    branches: [warehouse-update-v12]
+    paths:
+      - 'scripts/v12_warehouse_update.py'
+      - '.github/workflows/v12-validation-3.yml'
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: warehouse-update-v12
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python scripts/v12_warehouse_update.py
+      - run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+      - run: python -m compileall -q inventory_tracker.py gp_store.py gp_ui.py gp_ocr.py invoice_ocr_worker.py
+      - run: python -m pytest -o addopts='' -q
+      - name: OCR metadata test
+        run: |
+          python - <<'PY'
+          from invoice_ocr_worker import parse_header_metadata
+          m,c=parse_header_metadata([
+            {'text':'مذكرة تسليم (إخراج مخازن)','score':.95,'x':500,'y':100,'region':'header'},
+            {'text':'للسيد / محمد احمد','score':.95,'x':400,'y':150,'region':'header'}],1000,1200)
+          assert m=='OUT'; assert 'محمد' in c
+          PY
+      - name: Admin report deletion test
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from gp_core import COL_CODE,COL_NAME,COL_QTY,ensure_unique_stock_keys
+          from gp_store import Store
+          s=Store.for_tests(); pw='WarehouseTest_2026'; s.initialize(password=pw); t=s.login('admin',pw)
+          a=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:'A',COL_NAME:'Item A',COL_QTY:5}]))
+          op1=s.replace_stock(t,pw,a,'b1',s.state(t)['revision'],source_name='r1.xlsx')
+          b=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:'A',COL_NAME:'Item A',COL_QTY:9}]))
+          op2=s.replace_stock(t,pw,b,'b2',s.state(t)['revision'],source_name='r2.xlsx')
+          k=s.stock(t).iloc[0]['مفتاح المخزون']
+          s.post(t,pw,[dict(item_key=k,movement_type='OUT',quantity=1)],'m1',reference='M1',reason='manual',delivery_note=True)
+          s.delete_stock_report(t,pw,op1)
+          assert float(s.stock(t).iloc[0][COL_QTY])==8.0
+          ids={r['operation_id'] for r in s.deletion_catalog(t)['stock_reports']}
+          assert op1 not in ids and op2 in ids
+          PY
+      - name: UI test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import gp_ui
+          assert gp_ui.BUILD=='GP-CLOUD-v12'
+          app=Path('inventory_tracker.py').read_text()
+          assert 'result=extract_invoice_data(uploaded,stock)' in app
+          css=Path('assets/style.css').read_text()
+          assert 'v12: accessible form cells' in css
+          PY
+      - name: Commit validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add requirements.txt inventory_tracker.py gp_store.py gp_ui.py gp_ocr.py invoice_ocr_worker.py assets/style.css
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat: accessible forms invoice metadata OCR and force report delete'
+            git push origin HEAD:warehouse-update-v12
+          fi
