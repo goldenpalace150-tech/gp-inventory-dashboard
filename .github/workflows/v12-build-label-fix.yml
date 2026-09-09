@@ -1,0 +1,34 @@
+name: V12 build label fix
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/v12-build-label-fix.yml'
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Fix build label
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('gp_ui.py')
+          s=p.read_text(encoding='utf-8')
+          old='BUILD = "GP-CLOUD-v11"'
+          if old not in s:
+              raise SystemExit('expected v11 build marker not found')
+          p.write_text(s.replace(old,'BUILD = "GP-CLOUD-v12"',1),encoding='utf-8')
+          PY
+      - run: python -m compileall -q gp_ui.py
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add gp_ui.py
+          git commit -m 'fix: set GP-CLOUD-v12 build label'
+          git push origin HEAD:main
