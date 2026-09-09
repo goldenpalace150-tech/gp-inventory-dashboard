@@ -1,0 +1,74 @@
+name: V11 warehouse validation 2
+on:
+  push:
+    branches: [warehouse-update-v11]
+    paths:
+      - 'scripts/v11_fix_build.py'
+      - '.github/workflows/v11-validation-2.yml'
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: warehouse-update-v11
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply v11 source update
+        run: |
+          python scripts/v11_warehouse_update.py
+          python scripts/v11_fix_build.py
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+      - name: Compile
+        run: python -m compileall -q inventory_tracker.py gp_store.py gp_ui.py gp_core.py gp_invoice.py
+      - name: Regression suite
+        run: python -m pytest -o addopts='' -q
+      - name: Validate invoice overwrite and metadata
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from gp_core import COL_CODE,COL_NAME,COL_QTY,ensure_unique_stock_keys
+          from gp_store import Store,AppError
+          s=Store.for_tests(); pw='Test-Password-2026'; s.initialize(password=pw); token=s.login('admin',pw)
+          stock=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:'010716',COL_NAME:'Camera',COL_QTY:10},{COL_CODE:'010732',COL_NAME:'Memory 128',COL_QTY:10}]))
+          s.replace_stock(token,pw,stock,'base',s.state(token)['revision'],source_name='warehouse.xlsx')
+          cur=s.stock(token).set_index(COL_CODE); k1=cur.at['010716','مفتاح المخزون']; k2=cur.at['010732','مفتاح المخزون']
+          old=[dict(item_key=k1,movement_type='OUT',quantity=3),dict(item_key=k2,movement_type='OUT',quantity=4)]
+          reviewed={'customer_name':'Customer A','driver':'Driver 1','items':[]}
+          s.post(token,pw,old,'inv-post',source='INVOICE',reference='8042',image_hash='a'*64,reason='Invoices',delivery_note=True,reviewed=reviewed,customer_name='Customer A',driver='Driver 1')
+          assert s.invoice_duplicate(token,'8042',old,reviewed)['identical']
+          new=[dict(item_key=k1,movement_type='OUT',quantity=2),dict(item_key=k2,movement_type='OUT',quantity=1)]
+          assert not s.invoice_duplicate(token,'8042',new,reviewed)['identical']
+          s.replace_invoice(token,pw,new,'inv-update',reference='8042',image_hash='b'*64,reviewed=reviewed,customer_name='Customer A',driver='Driver 1')
+          rows=s.recent_invoices(token); assert len(rows)==1 and rows[0]['total_quantity']==3.0 and rows[0]['driver']=='Driver 1'
+          hist=s.movement_history(token); local=hist[hist['المرجع']=='8042']; assert set(local['الزبون'])=={'Customer A'} and set(local['السائق'])=={'Driver 1'}
+          print('invoice overwrite passed')
+          PY
+      - name: Validate UI
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import gp_ui
+          gp_ui.set_language('ar')
+          assert gp_ui.BUILD=='GP-CLOUD-v11'
+          assert gp_ui.t('Driver')=='السائق'
+          assert gp_ui.t('Customer name')=='اسم الزبون'
+          app=Path('inventory_tracker.py').read_text(); css=Path('assets/style.css').read_text()
+          assert 'format="%.1f"' in app and 'Duplicate action' in app and 'recent_invoices' in app and '.gp-form-gap' in css
+          print('UI passed')
+          PY
+      - name: Commit validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add inventory_tracker.py gp_store.py gp_ui.py assets/style.css
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat: invoice drivers metadata duplicate overwrite and spacing'
+            git push origin HEAD:warehouse-update-v11
+          fi
