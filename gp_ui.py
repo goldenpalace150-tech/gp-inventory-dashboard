@@ -150,7 +150,7 @@ def section_html(title,note=""):
     return f'<div class="gp-section" dir="rtl"><h2>{html.escape(t(title))}</h2><p>{html.escape(t(note))}</p></div>'
 
 # ---- v6 bilingual / branded waiting helpers ----
-BUILD = "GP-CLOUD-v11"
+BUILD = "GP-CLOUD-v12"
 LANGUAGE = "ar"
 AR.update({
     "Language": "اللغة", "Arabic": "العربية", "English": "English",
