@@ -113,6 +113,13 @@ def test_ui_uses_sidebar_without_global_rtl_rule():
     root=Path(__file__).resolve().parents[1]
     source=(root/"inventory_tracker.py").read_text()
     assert "with st.sidebar:" in source and "sidebar_navigation" in source
+    assert 'requested=st.session_state.pop("nav_request",None)' in source
+    assert 'if "sidebar_nav" not in st.session_state or requested in nav:' in source
+    assert 'st.session_state.get("sidebar_nav")!=desired' not in source
+    assert 'st.session_state["nav_request"]="Invoices"' in source
+    assert 'st.session_state["nav_request"]="Movements"' in source
+    assert 'st.session_state["nav_request"]="Stock"' in source
+    assert 'st.session_state["nav_request"]="Analysis"' in source
     assert "use_container_width" not in source
     stylesheet=(root/"assets/style.css").read_text()
     assert "h1, h2, h3, h4, p, span, label, div" not in stylesheet

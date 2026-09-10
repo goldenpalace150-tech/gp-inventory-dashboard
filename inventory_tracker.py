@@ -145,13 +145,13 @@ def dashboard_page(store,token,state,stock,daily,actor):
     st.markdown("### "+t("Quick actions"))
     q1,q2,q3,q4=st.columns(4)
     if q1.button(t("Read invoice"),type="primary",width="stretch",key="dash_invoice"):
-        st.session_state["page"]="Invoices"; st.rerun()
+        st.session_state["nav_request"]="Invoices"; st.rerun()
     if q2.button(t("New movement"),width="stretch",key="dash_movement"):
-        st.session_state["page"]="Movements"; st.rerun()
+        st.session_state["nav_request"]="Movements"; st.rerun()
     if q3.button(t("Stock"),width="stretch",key="dash_stock"):
-        st.session_state["page"]="Stock"; st.rerun()
+        st.session_state["nav_request"]="Stock"; st.rerun()
     if q4.button(t("Analysis"),width="stretch",key="dash_analysis"):
-        st.session_state["page"]="Analysis"; st.rerun()
+        st.session_state["nav_request"]="Analysis"; st.rerun()
 
     left,right=st.columns([1.15,1])
     with left:
@@ -627,9 +627,13 @@ def _language_picker(key):
 
 def sidebar_navigation(store,token,actor,stamp):
     nav=["Dashboard","Stock","Invoices","Movements","Analysis","Closing","Settings"]
-    desired=st.session_state.get("page","Dashboard")
+    # Streamlit updates sidebar_nav before each rerun when the user clicks the radio.
+    # Never overwrite that click from the older page value. Programmatic navigation
+    # uses nav_request and is consumed here before the radio widget is created.
+    requested=st.session_state.pop("nav_request",None)
+    desired=requested if requested in nav else st.session_state.get("page","Dashboard")
     if desired not in nav:desired="Dashboard"
-    if st.session_state.get("sidebar_nav")!=desired:
+    if "sidebar_nav" not in st.session_state or requested in nav:
         st.session_state["sidebar_nav"]=desired
     icons={"Dashboard":"⌂","Stock":"▦","Invoices":"▤","Movements":"⇄","Analysis":"◫","Closing":"✓","Settings":"⚙"}
     with st.sidebar:
