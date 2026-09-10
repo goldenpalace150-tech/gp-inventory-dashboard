@@ -1,0 +1,44 @@
+name: V15 Zoho warehouse shell
+on:
+  push:
+    branches: [warehouse-shell-v15]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply v15 Zoho shell
+        run: python scripts/v15_zoho_shell.py
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+      - name: Compile
+        run: python -m compileall -q inventory_tracker.py gp_ui.py gp_ocr.py invoice_ocr_worker.py
+      - name: Regression suite
+        run: python -m pytest -o addopts='' -q
+      - name: Validate v15 markers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('inventory_tracker.py').read_text()
+          ui=Path('gp_ui.py').read_text()
+          css=Path('assets/style.css').read_text()
+          assert 'def sidebar_navigation(' in app
+          assert 'with st.sidebar:' in app
+          assert 'st.container(border=True,key="invoice_workspace")' in app
+          assert 'review_checked' not in app
+          assert 'GP-CLOUD-v15' in ui
+          assert 'v15: persistent Zoho-style workspace shell' in css
+          print('v15 markers OK')
+          PY
+      - name: Commit validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add inventory_tracker.py gp_ui.py assets/style.css tests/test_core_and_ocr.py
+          git diff --cached --quiet || git commit -m 'feat: persistent Zoho warehouse shell v15'
+          git push
