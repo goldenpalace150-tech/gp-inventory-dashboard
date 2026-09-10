@@ -29,7 +29,7 @@ for _name in (
 os.environ["MALLOC_ARENA_MAX"] = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-BUILD = "GP-OCR-WAREHOUSE-v14"
+BUILD = "GP-OCR-WAREHOUSE-v16"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 MAX_SOURCE_SIDE = 1200
@@ -283,11 +283,14 @@ def _run_region(array, region, x0, y0, x1, y1):
 
 
 def run_targeted_ocr(array):
-    """Scan only code, quantity and summary strips; ignore phones, prices and Arabic names."""
+    """Scan only item rows and the lower summary band; ignore phones and prices."""
     boxes = []
     boxes.extend(_run_region(array, "code", 0.70, 0.28, 1.00, 0.63))
     boxes.extend(_run_region(array, "qty", 0.17, 0.28, 0.44, 0.63))
-    boxes.extend(_run_region(array, "summary", 0.00, 0.58, 0.55, 0.78))
+    # Invoice number 8042 in the Golden Palace template sits above the printed
+    # quantity total in the lower-left summary table. Start at 48% so the number
+    # is not clipped by the old 58% crop.
+    boxes.extend(_run_region(array, "summary", 0.00, 0.48, 0.55, 0.76))
     _stage("targeted_ocr_done", boxes=len(boxes))
     return boxes
 
@@ -353,7 +356,10 @@ def parse_summary(boxes, width, height):
         text = _clean(box["text"]).replace(" ", "").replace(",", ".")
         if box["score"] < _MIN_SCORE:
             continue
-        if box["x"] <= width * 0.24 and height * 0.60 <= box["y"] <= height * 0.80:
+        # The invoice number is the upper numeric value in the left summary cells.
+        # A score-first sort could incorrectly choose 9.00 (rendered as 900) when
+        # OCR happened to score the total more strongly than invoice 8042.
+        if box["x"] <= width * 0.30 and height * 0.48 <= box["y"] <= height * 0.72:
             digits = re.sub(r"[^0-9]", "", text)
             if re.fullmatch(r"[0-9]{3,8}", digits):
                 reference_candidates.append((digits, box["score"], box["y"]))
@@ -368,7 +374,9 @@ def parse_summary(boxes, width, height):
 
     reference = ""
     if reference_candidates:
-        reference_candidates.sort(key=lambda x: (-x[1], x[2]))
+        # Position is authoritative on this fixed template: invoice number is above
+        # the total. Confidence only breaks ties on the same row.
+        reference_candidates.sort(key=lambda x: (x[2], -x[1]))
         reference = reference_candidates[0][0]
 
     printed_total = None

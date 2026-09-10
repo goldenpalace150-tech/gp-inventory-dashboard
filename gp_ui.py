@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v15.1"
+BUILD = "GP-CLOUD-v16"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -163,6 +163,16 @@ AR.update({
 })
 
 
+
+# ---- v16 operator wording ----
+AR.update({
+    "Invoice review": "مراجعة الفاتورة",
+    "Unfinished invoices": "فواتير غير مكتملة",
+    "Save changes": "حفظ التعديلات",
+    "Cancel invoice": "إلغاء الفاتورة",
+})
+
+
 def set_language(value):
     global LANGUAGE
     LANGUAGE = "en" if str(value).lower().startswith("en") else "ar"
@@ -311,7 +321,7 @@ AR.update({
 
 # ---- v14 operator UX cleanup ----
 AR.update({
-    "Warehouse report delete hint": "اختر تقرير المستودع وأدخل كلمة مرور الاعتماد ثم اضغط حذف. الحذف متاح للمدير فقط ولا يغيّر الرصيد الحالي أو الحركات اللاحقة.",
+    "Warehouse report delete hint": "حذف التقرير يعيد بناء الرصيد من آخر تقرير مستودع متبقٍ، وإذا لم يبقَ أي تقرير يتم تفريغ الرصيد الحالي.",
     "OCR hint": "ارفع الفاتورة؛ يقرأ النظام نوع الحركة من عنوان المستند في الأعلى، ثم رقم الفاتورة والمواد والكميات، ويملأ اسم الزبون إذا ظهر بوضوح. راجع الحقول قبل الاعتماد.",
 })
 

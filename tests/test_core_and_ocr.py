@@ -76,10 +76,36 @@ def test_quantity_parser():
     assert parse_quantity(boxes,400,1000,1200)==3
 
 
-def test_reference_parser_prefers_strong_candidate():
-    boxes=[{"text":"8042","score":.95,"x":100,"y":760},{"text":"9.00","score":.9,"x":100,"y":850}]
+def test_reference_parser_prefers_template_position_over_total_score():
+    # Real Golden Palace layout: invoice number is above the lower printed total.
+    # The total may have a higher OCR confidence and must still not become "900".
+    boxes=[{"text":"8042","score":.72,"x":110,"y":620,"region":"summary"},
+           {"text":"9.00","score":.98,"x":110,"y":690,"region":"summary"}]
     reference,total=parse_summary(boxes,1000,1200)
-    assert reference=="8042"
+    assert reference=="8042" and total==9.0
+
+
+
+def test_delete_stock_report_rebuilds_then_clears_current_stock():
+    s=Store.for_tests();pw="Test-Password-2026";s.initialize(password=pw);t=s.login("admin",pw)
+    first=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"010716",COL_NAME:"Camera",COL_QTY:10}]))
+    first_op=s.replace_stock(t,pw,first,"base-delete-1",s.state(t)["revision"],source_name="first.xlsx")
+    second=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"010716",COL_NAME:"Camera",COL_QTY:25}]))
+    second_op=s.replace_stock(t,pw,second,"base-delete-2",s.state(t)["revision"],source_name="second.xlsx")
+    assert s.stock(t).iloc[0][COL_QTY]==25
+    s.delete_stock_report(t,pw,second_op)
+    assert s.stock(t).iloc[0][COL_QTY]==10
+    s.delete_stock_report(t,pw,first_op)
+    assert s.stock(t).empty
+
+
+def test_invoice_ui_hides_draft_workflow_and_cleans_failed_scans():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'section("Drafts")' not in source
+    assert 'section("Invoice review")' in source
+    assert 't("Save changes")' in source
+    assert 'failed_empty=[d for d in drafts' in source
+    assert 'store.discard_draft(token,draft_id)' in source
 
 
 def test_scan_lock_is_shared():

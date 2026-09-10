@@ -132,6 +132,14 @@ def export_button(name,sheets):
 def dashboard_page(store,token,state,stock,daily,actor):
     """Zoho-inspired operational landing page: KPIs, quick actions and recent work."""
     section("Dashboard","Dashboard hint")
+    # Without an active warehouse baseline there is no meaningful current-stock
+    # dashboard. Historical movements remain in their own log, but do not masquerade
+    # as a current warehouse balance.
+    if stock.empty:
+        st.info(t("No stock"))
+        if actor["role"]=="admin" and st.button(t("Settings"),width="stretch",key="dash_open_settings"):
+            st.session_state["nav_request"]="Settings"; st.rerun()
+        return
     alerts=int(daily["without_invoice"].sum()) if not daily.empty else 0
     available=int((stock[COL_QTY]>0).sum()) if not stock.empty else 0
     out_count=int((stock[COL_QTY]<=0).sum()) if not stock.empty else 0
@@ -247,6 +255,11 @@ def invoices_page(store,token,state,stock):
                             store.save_draft(token,draft_id,result,pending[draft_id]["version"])
                             success(message="Saved")
                         except Exception as error:
+                            # A failed scan must not leave a blank technical "draft"
+                            # behind. The operator can simply correct the photo and retry.
+                            try:store.discard_draft(token,draft_id)
+                            except Exception:pass
+                            st.session_state.pop("selected_draft_id",None)
                             if isinstance(error,(RuntimeError,ValueError)):st.error(str(error)[:1000])
                             else:show_error(error)
         with preview:
@@ -256,33 +269,36 @@ def invoices_page(store,token,state,stock):
             else:
                 st.markdown('<div class="gp-invoice-empty">'+t("Invoice preview hint")+'</div>',unsafe_allow_html=True)
 
-    section("Drafts")
+    # Pending invoice_drafts remain an internal safety/recovery layer. Do not expose
+    # the database concept as a separate operator workflow.
     drafts=store.drafts(token)
+    failed_empty=[d for d in drafts if d.get("image_hash") and not (d.get("payload") or {})]
+    if failed_empty:
+        for stale in failed_empty:
+            try:store.discard_draft(token,stale["draft_id"])
+            except Exception:pass
+        drafts=store.drafts(token)
+
     if drafts:
+        section("Invoice review")
         choices={d["draft_id"]:d for d in drafts}
         selected=st.session_state.get("selected_draft_id")
         if selected not in choices:selected=drafts[0]["draft_id"]
-        selected=st.selectbox(t("Drafts"),list(choices),index=list(choices).index(selected),
-            format_func=lambda k: (choices[k]["payload"].get("invoice_number") or choices[k]["source_name"] or k[:8])+" / "+choices[k]["username"],
-            key="draft_selector")
+        if len(choices)>1:
+            selected=st.selectbox(t("Unfinished invoices"),list(choices),index=list(choices).index(selected),
+                format_func=lambda k: (choices[k]["payload"].get("invoice_number") or choices[k]["source_name"] or k[:8]),
+                key="draft_selector")
         st.session_state["selected_draft_id"]=selected
         draft=choices[selected];payload=draft["payload"];suffix=selected+"_"+str(draft["version"])
-        # OCR diagnostics remain stored in the draft payload for troubleshooting,
-        # but the operator sees the extracted fields directly instead of a stack
-        # of technical yellow warnings.
-        st.caption(t("Draft hint"))
         rows=payload.get("items") or []
         try:rows,ignored_saved=canonicalize_invoice_rows(rows,stock,drop_unknown=True)
         except AppError:rows,ignored_saved=[],[]
-        # Numbers that are not valid warehouse item codes are silently ignored.
-        # They remain available in OCR diagnostics, but do not confuse the operator.
         rows=rows or [{"item_code":"","item_name":"","quantity":None}]
         frame=pd.DataFrame(rows)[["item_code","item_name","quantity"]]
         frame["item_code"]=frame["item_code"].fillna("").astype(str)
         frame["item_name"]=frame["item_name"].fillna("").astype(str)
         frame["quantity"]=pd.to_numeric(frame["quantity"],errors="coerce")
         with st.form("review_"+suffix):
-            st.markdown("#### "+t("Invoice details"))
             a,b,c,d=st.columns([1.15,1.5,1.15,1])
             reference=a.text_input(t("Reference"),value=str(payload.get("invoice_number","")),key="reference_"+suffix)
             customer=b.text_input(t("Customer name"),value=str(payload.get("customer_name","")),key="customer_"+suffix)
@@ -300,7 +316,7 @@ def invoices_page(store,token,state,stock):
             duplicate_action=st.selectbox(t("Duplicate action"),["ignore","overwrite"],format_func=lambda x:t("Ignore duplicate" if x=="ignore" else "Overwrite if changed"),key="duplicate_"+suffix,help=t("Duplicate invoice hint"))
             password=st.text_input(t("Approval password"),type="password",key="password_invoice_"+suffix)
             a,b=st.columns(2)
-            save=a.form_submit_button(t("Save draft"),width="stretch")
+            save=a.form_submit_button(t("Save changes"),width="stretch")
             post=b.form_submit_button(t("Post invoice"),type="primary",width="stretch")
             if save or post:
                 try:
@@ -326,12 +342,9 @@ def invoices_page(store,token,state,stock):
                                 expected_draft_version=draft["version"],customer_name=customer,driver=driver)
                             success("invoice_"+selected)
                 except Exception as error:show_error(error)
-        with st.expander(t("Discard")):
-            discard_ok=st.checkbox(t("Discard"),key="discard_check_"+suffix)
-            if st.button(t("Discard"),disabled=not discard_ok,key="discard_"+suffix):
+        with st.expander(t("Cancel invoice")):
+            if st.button(t("Cancel invoice"),key="discard_"+suffix):
                 store.discard_draft(token,selected);success()
-    else:
-        st.info(t("No drafts"))
 
     section("Posted invoices")
     posted=store.recent_invoices(token,100)

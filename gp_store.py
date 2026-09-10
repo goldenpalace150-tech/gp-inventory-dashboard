@@ -906,11 +906,12 @@ class Store:
             return self._delete_posted_operation_tx(c,actor,operation_id,"MANUAL")
 
     def delete_stock_report(self,token,password,operation_id):
-        """Admin-only force delete of a warehouse-report record.
+        """Delete a warehouse baseline and rebuild the current stock truth.
 
-        This deliberately removes the selected baseline snapshot/history record without
-        rewinding current stock or later ledger rows. It therefore has no dependency
-        condition and cannot invalidate quantities already used by later movements.
+        The newest remaining baseline becomes authoritative. Later movements are
+        replayed on top of it and their before/after balances are recalculated. If
+        no warehouse baseline remains, current stock is cleared; historical ledger
+        rows remain available as history but cannot act as a stock baseline.
         """
         with self.engine.begin() as c:
             self._lock(c); actor=self._actor(c,token,password,admin=True)
@@ -924,13 +925,59 @@ class Store:
             ).with_for_update()).mappings().first()
             if not op or op["source"]!="BASELINE":raise AppError("Record not found")
             payload=target["stock"] if isinstance(target["stock"],dict) else {}
+
             c.execute(delete(baselines).where(baselines.c.operation_id==target["operation_id"]))
             c.execute(delete(operations).where(operations.c.operation_id==target["operation_id"]))
+
+            stock_table=self.tables["stock_state"]
+            ledger=self.tables["movement_ledger"]
+            remaining=c.execute(select(baselines).order_by(baselines.c.created_at.desc()).limit(1).with_for_update()).mappings().first()
+            c.execute(delete(stock_table))
+
+            active_source=""
+            rebuilt={}
+            replayed=0
+            now=utcnow()
+            if remaining:
+                base_payload=remaining["stock"] if isinstance(remaining["stock"],dict) else {}
+                active_source=str(base_payload.get("source_name","") or "")
+                for raw in base_payload.get("after",[]) or []:
+                    key=str(raw.get("item_key","") or "").strip()
+                    code=normalize_item_code(raw.get("item_code",""))
+                    name=str(raw.get("item_name","") or "").strip()
+                    if not key or not name or key in rebuilt:
+                        raise AppError("Cannot rebuild stock from the remaining warehouse report")
+                    rebuilt[key]=dict(item_key=key,item_code=code,item_name=name,
+                        quantity=decimal_qty(raw.get("quantity"),normalize=True),
+                        match_key=str(raw.get("match_key","") or item_link_key(code,name)),updated_at=now)
+
+                later=c.execute(select(ledger).where(
+                    ledger.c.created_at>remaining["created_at"]
+                ).order_by(ledger.c.ledger_id).with_for_update()).mappings().all()
+                for row in later:
+                    key=row["item_key"]
+                    if key not in rebuilt:
+                        raise AppError("Cannot delete this report because later movements use an item missing from the previous warehouse report")
+                    before=decimal_qty(rebuilt[key]["quantity"])
+                    qty=decimal_qty(row["quantity"],positive=True)
+                    after=before+qty if row["movement_type"]=="IN" else before-qty
+                    if after<0:
+                        raise AppError("Cannot delete this report because later OUT movements would make stock negative")
+                    rebuilt[key]["quantity"]=after
+                    c.execute(update(ledger).where(ledger.c.ledger_id==row["ledger_id"]).values(
+                        quantity_before=before,quantity_after=after))
+                    replayed+=1
+
+                if rebuilt:
+                    c.execute(insert(stock_table),list(rebuilt.values()))
+
             self._audit(c,actor["username"],"DELETE_STOCK_REPORT",{
                 "operation_id":target["operation_id"],
                 "source_name":payload.get("source_name",""),
-                "forced":True,
-                "current_stock_unchanged":True,
+                "current_stock_rebuilt":True,
+                "active_source":active_source,
+                "remaining_items":len(rebuilt),
+                "replayed_movements":replayed,
             })
             self._touch(c)
             return target["operation_id"]
