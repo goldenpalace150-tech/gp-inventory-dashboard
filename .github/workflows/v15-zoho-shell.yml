@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Apply v15 Zoho shell
-        run: python scripts/v15_zoho_shell.py
+        run: python scripts/v15_runner.py
       - name: Install requirements
         run: python -m pip install -r requirements.txt 'pytest>=8,<10'
       - name: Compile
