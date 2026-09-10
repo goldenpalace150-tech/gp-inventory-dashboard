@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v13"
+BUILD = "GP-CLOUD-v14"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -306,4 +306,11 @@ AR.update({
     "Today's activity": "حركة اليوم",
     "Warehouse status": "حالة المستودع",
     "Recent invoices": "أحدث الفواتير",
+})
+
+
+# ---- v14 operator UX cleanup ----
+AR.update({
+    "Warehouse report delete hint": "اختر تقرير المستودع وأدخل كلمة مرور الاعتماد ثم اضغط حذف. الحذف متاح للمدير فقط ولا يغيّر الرصيد الحالي أو الحركات اللاحقة.",
+    "OCR hint": "ارفع الفاتورة؛ يقرأ النظام نوع الحركة من عنوان المستند في الأعلى، ثم رقم الفاتورة والمواد والكميات، ويملأ اسم الزبون إذا ظهر بوضوح. راجع الحقول قبل الاعتماد.",
 })

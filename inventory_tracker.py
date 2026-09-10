@@ -262,12 +262,15 @@ def invoices_page(store,token,state,stock):
             key="draft_selector")
         st.session_state["selected_draft_id"]=selected
         draft=choices[selected];payload=draft["payload"];suffix=selected+"_"+str(draft["version"])
-        for message in payload.get("warnings",[])[:6]:st.warning(str(message))
+        # OCR diagnostics remain stored in the draft payload for troubleshooting,
+        # but the operator sees the extracted fields directly instead of a stack
+        # of technical yellow warnings.
         st.caption(t("Draft hint"))
         rows=payload.get("items") or []
         try:rows,ignored_saved=canonicalize_invoice_rows(rows,stock,drop_unknown=True)
         except AppError:rows,ignored_saved=[],[]
-        if ignored_saved:st.warning(t("Ignored non-item numbers")+": "+", ".join(ignored_saved[:8]))
+        # Numbers that are not valid warehouse item codes are silently ignored.
+        # They remain available in OCR diagnostics, but do not confuse the operator.
         rows=rows or [{"item_code":"","item_name":"","quantity":None}]
         frame=pd.DataFrame(rows)[["item_code","item_name","quantity"]]
         frame["item_code"]=frame["item_code"].fillna("").astype(str)
@@ -524,9 +527,8 @@ def deletion_panel(store,token):
             f"{by_id[op]['source_name'] or t('Warehouse report')} | {_local_stamp(store,by_id[op]['created_at'])} | {by_id[op]['item_count']} {t('Items')}",key="delete_stock_report_select")
         with st.form("delete_stock_report_form"):
             st.caption(t("Warehouse report delete hint"))
-            confirmed=st.checkbox(t("Confirm delete"),key="delete_stock_report_confirm")
             password=st.text_input(t("Approval password"),type="password",key="password_delete_stock")
-            if st.form_submit_button(t("Delete warehouse report"),type="primary",disabled=not confirmed):
+            if st.form_submit_button(t("Delete warehouse report"),type="primary"):
                 try:store.delete_stock_report(token,password,selected);success(message="Deleted")
                 except Exception as error:show_error(error)
     else:st.info(t("No warehouse reports"))

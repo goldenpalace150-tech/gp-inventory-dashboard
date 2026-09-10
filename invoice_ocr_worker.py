@@ -29,7 +29,7 @@ for _name in (
 os.environ["MALLOC_ARENA_MAX"] = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-BUILD = "GP-OCR-WAREHOUSE-v12"
+BUILD = "GP-OCR-WAREHOUSE-v14"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 MAX_SOURCE_SIDE = 1200
@@ -196,8 +196,11 @@ def run_header_ocr(array):
     _engine = None
     gc.collect()
     height, width = array.shape[:2]
-    left, top = int(width * 0.02), int(height * 0.20)
-    right, bottom = int(width * 0.98), int(height * 0.45)
+    # The movement title (for example: مذكرة تسليم / إخراج مواد) is printed
+    # close to the top of the Golden Palace invoice. Start much earlier than the
+    # previous 20% crop while still including the recipient/customer line below.
+    left, top = int(width * 0.02), int(height * 0.04)
+    right, bottom = int(width * 0.98), int(height * 0.46)
     crop = array[top:bottom, left:right]
     if crop.size == 0:
         return []
@@ -221,17 +224,22 @@ def parse_header_metadata(boxes, width, height):
             if b.get("score", 0) >= 0.28 and b.get("region") in (None, "header")]
     normalized = [_arabic_search_text(row.get("text", "")) for row in rows]
     joined = " | ".join(normalized)
+    compact = re.sub(r"\s+", "", joined)
+
+    def has_phrase(value):
+        value = _arabic_search_text(value)
+        return value in joined or re.sub(r"\s+", "", value) in compact
 
     movement = ""
-    # Prefer explicit stock terminology. Generic delivery/receipt words are only
-    # fallbacks because they can also appear in explanatory sentences.
-    if any(token in joined for token in ("اخراج مواد", "اخراج مخازن", "حركة اخراج", "مذكرة تسليم")):
+    # Read the document title first. The compact comparison also catches OCR that
+    # inserts/removes spaces between Arabic words.
+    if any(has_phrase(token) for token in ("اخراج مواد", "اخراج مخازن", "حركة اخراج", "مذكرة تسليم")):
         movement = "OUT"
-    elif any(token in joined for token in ("ادخال مواد", "ادخال مخازن", "حركة ادخال", "مذكرة استلام")):
+    elif any(has_phrase(token) for token in ("ادخال مواد", "ادخال مخازن", "حركة ادخال", "مذكرة استلام")):
         movement = "IN"
-    elif "اخراج" in joined:
+    elif has_phrase("اخراج"):
         movement = "OUT"
-    elif "ادخال" in joined:
+    elif has_phrase("ادخال"):
         movement = "IN"
 
     customer = ""
