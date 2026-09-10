@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v16"
+BUILD = "GP-CLOUD-v16.1"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -150,7 +150,7 @@ def section_html(title,note=""):
     return f'<div class="gp-section" dir="rtl"><h2>{html.escape(t(title))}</h2><p>{html.escape(t(note))}</p></div>'
 
 # ---- v6 bilingual / branded waiting helpers ----
-BUILD = "GP-CLOUD-v12"
+# BUILD is defined once at module top. Do not override it in legacy helper sections.
 LANGUAGE = "ar"
 AR.update({
     "Language": "اللغة", "Arabic": "العربية", "English": "English",
