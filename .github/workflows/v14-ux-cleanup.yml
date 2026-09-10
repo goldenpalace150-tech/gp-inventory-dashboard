@@ -1,0 +1,45 @@
+name: V14 Warehouse UX cleanup
+on:
+  push:
+    branches: [warehouse-ui-v14]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply v14 UX cleanup
+        run: python scripts/v14_ux_cleanup.py
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+      - name: Compile
+        run: python -m compileall -q inventory_tracker.py gp_ui.py gp_ocr.py invoice_ocr_worker.py
+      - name: Regression suite
+        run: python -m pytest -o addopts='' -q
+      - name: Validate v14 markers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('inventory_tracker.py').read_text()
+          worker=Path('invoice_ocr_worker.py').read_text()
+          ui=Path('gp_ui.py').read_text()
+          assert 'disabled=not confirmed' not in app.split('delete_stock_report_form',1)[1].split('else:st.info(t("No warehouse reports"))',1)[0]
+          assert 'for message in payload.get("warnings",[])[:6]' not in app
+          assert 'ignored_saved:st.warning' not in app
+          assert 'int(height * 0.04)' in worker
+          assert 'compact = re.sub' in worker
+          assert 'GP-CLOUD-v14' in ui
+          assert 'GP-OCR-WAREHOUSE-v14' in worker
+          print('v14 markers OK')
+          PY
+      - name: Commit validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add inventory_tracker.py gp_ui.py gp_ocr.py invoice_ocr_worker.py
+          git diff --cached --quiet || git commit -m 'fix: simplify admin deletion and invoice OCR review v14'
+          git push
