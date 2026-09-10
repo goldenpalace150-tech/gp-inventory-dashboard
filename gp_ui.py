@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v14"
+BUILD = "GP-CLOUD-v15"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -313,4 +313,16 @@ AR.update({
 AR.update({
     "Warehouse report delete hint": "اختر تقرير المستودع وأدخل كلمة مرور الاعتماد ثم اضغط حذف. الحذف متاح للمدير فقط ولا يغيّر الرصيد الحالي أو الحركات اللاحقة.",
     "OCR hint": "ارفع الفاتورة؛ يقرأ النظام نوع الحركة من عنوان المستند في الأعلى، ثم رقم الفاتورة والمواد والكميات، ويملأ اسم الزبون إذا ظهر بوضوح. راجع الحقول قبل الاعتماد.",
+})
+
+
+# ---- v15 Zoho workspace shell ----
+AR.update({
+    "Inventory": "إدارة المستودعات",
+    "Stock": "المستودع",
+    "Warehouse workspace": "مساحة عمل المستودع",
+    "Navigation": "التنقل",
+    "New invoice": "فاتورة جديدة",
+    "Invoice preview": "معاينة الفاتورة",
+    "Invoice preview hint": "ارفع صورة الفاتورة أو استخدم الكاميرا. ستظهر المعاينة هنا.",
 })

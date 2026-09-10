@@ -109,12 +109,14 @@ def test_worker_timeout(tmp_path,monkeypatch):
     with pytest.raises(RuntimeError,match="timed out"):_run_ocr_worker(b"image",worker_path=worker,timeout=.15)
 
 
-def test_ui_has_no_sidebar_or_global_rtl_rule():
+def test_ui_uses_sidebar_without_global_rtl_rule():
     root=Path(__file__).resolve().parents[1]
     source=(root/"inventory_tracker.py").read_text()
-    assert "st.sidebar" not in source and "use_container_width" not in source
+    assert "with st.sidebar:" in source and "sidebar_navigation" in source
+    assert "use_container_width" not in source
     stylesheet=(root/"assets/style.css").read_text()
     assert "h1, h2, h3, h4, p, span, label, div" not in stylesheet
+    assert '[data-testid="stSidebar"]' in stylesheet
     for f in root.glob("*.py"):ast.parse(f.read_text())
 
 

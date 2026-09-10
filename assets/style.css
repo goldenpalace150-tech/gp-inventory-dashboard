@@ -127,3 +127,59 @@ button:focus-visible, input:focus-visible { outline:3px solid var(--gp-gold); ou
   .gp-brand .gp-brand-copy h1 { font-size:1.45rem; }
   .st-key-navigation button { padding:.4rem .55rem; font-size:.82rem; }
 }
+
+
+/* v15: persistent Zoho-style workspace shell */
+[data-testid="stAppViewContainer"] { background:#f6f8fb; }
+[data-testid="stMainBlockContainer"] { max-width:none; padding:1.25rem 1.6rem 2rem; }
+[data-testid="stSidebar"] { background:#10263f; border-inline-end:1px solid #25415d; }
+[data-testid="stSidebar"] > div:first-child { padding-top:1rem; }
+[data-testid="stSidebar"] [data-testid="stImage"] { background:#fff; border:1px solid #d9c58e; border-radius:10px; padding:7px; margin-bottom:.25rem; }
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] { color:#dbe6f0 !important; }
+[data-testid="stSidebar"] hr { border-color:#35506b; margin:.75rem 0; }
+.gp-sidebar-title { direction:rtl; text-align:right; color:#fff; font-size:1.2rem; font-weight:850; margin:.15rem 0 0; }
+[data-testid="stSidebar"] [data-testid="stRadio"] > div { gap:.25rem; }
+[data-testid="stSidebar"] [data-testid="stRadio"] label { width:100%; padding:.55rem .65rem; border-radius:8px; border:1px solid transparent; transition:background .12s ease,border-color .12s ease; }
+[data-testid="stSidebar"] [data-testid="stRadio"] label:hover { background:#183956; border-color:#31516f; }
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) { background:#fff; border-color:#fff; }
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) p { color:#10263f !important; font-weight:850; }
+[data-testid="stSidebar"] [data-testid="stRadio"] label p { font-size:.95rem; font-weight:720; }
+[data-testid="stSidebar"] .gp-status { display:grid; gap:4px; color:#dbe6f0; font-size:.78rem; }
+[data-testid="stSidebar"] .gp-status-pill { color:#9fe0c5; }
+[data-testid="stSidebar"] .gp-muted { color:#9fb1c3; }
+[data-testid="stSidebar"] .stButton button { min-height:39px; border-radius:7px; }
+
+/* Main workspace is dense and operational instead of card-heavy. */
+.gp-section { margin:2px 0 8px; }
+.gp-section h2 { font-size:1.45rem; line-height:1.45; }
+.gp-section p { margin:1px 0 8px; }
+.gp-kpis { gap:9px; margin:3px 0 10px; }
+.gp-kpi { padding:12px 15px; border-radius:8px; }
+.gp-kpi strong { font-size:1.6rem; }
+[data-testid="stVerticalBlockBorderWrapper"] > div { border-radius:8px !important; }
+[data-testid="stForm"] { padding:.9rem 1rem; border-radius:8px; }
+[data-testid="stForm"] [data-testid="stHorizontalBlock"] { gap:8px !important; }
+[data-testid="stForm"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { border:1px solid #dbe3eb; border-radius:8px; padding:8px 10px 6px; background:#fff; }
+[data-testid="stFileUploaderDropzone"] { min-height:92px; border-radius:8px; background:#f9fbfd; }
+[data-testid="stAlert"] { border-radius:8px; padding:.6rem .75rem; }
+[data-testid="stDataFrame"] { border-radius:6px; }
+.stButton button, .stFormSubmitButton button, .stDownloadButton button { min-height:40px; border-radius:6px; }
+.gp-form-gap { height:8px; }
+
+/* Invoice workspace */
+.st-key-invoice_workspace { background:#fff; }
+.gp-invoice-empty { min-height:230px; border:1.5px dashed #c7d2de; border-radius:8px; background:#f8fafc; display:flex; align-items:center; justify-content:center; padding:24px; text-align:center; color:#718195; direction:rtl; }
+
+/* English restores LTR inside the sidebar; Arabic stays RTL. */
+[data-testid="stAppViewContainer"]:has(.gp-lang-en-marker) [data-testid="stSidebar"] p,
+[data-testid="stAppViewContainer"]:has(.gp-lang-en-marker) .gp-sidebar-title { direction:ltr; text-align:left; }
+
+@media(max-width:760px) {
+  [data-testid="stMainBlockContainer"] { padding:1rem .65rem 1.6rem; }
+  .gp-section h2 { font-size:1.3rem; }
+  .gp-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  [data-testid="stForm"] { padding:.75rem; }
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { padding:7px 8px 5px; }
+  .gp-invoice-empty { min-height:150px; }
+}

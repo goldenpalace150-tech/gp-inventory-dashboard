@@ -31,7 +31,7 @@ from gp_invoice import match_invoice_lines, canonicalize_invoice_rows
 from gp_reports import visible_frame, excel_bytes, day_report_sheets
 
 st.set_page_config(page_title="Golden Palace | Inventory",
-                   page_icon=Image.open(ROOT/"assets/favicon.png"),layout="wide",initial_sidebar_state="collapsed")
+                   page_icon=Image.open(ROOT/"assets/favicon.png"),layout="wide",initial_sidebar_state="auto")
 st.markdown("<style>"+css()+"</style>",unsafe_allow_html=True)
 LOG=logging.getLogger("golden_palace")
 
@@ -212,11 +212,13 @@ def invoices_page(store,token,state,stock):
     section("Invoices","OCR hint")
     ok,_,detail=free_ocr_status()
     code_master_ready = (not stock.empty and stock[COL_CODE].fillna("").astype(str).str.strip().ne("").all())
-    with st.container(border=True):
-        left,right=st.columns([1.6,1])
-        with left:
+    with st.container(border=True,key="invoice_workspace"):
+        preview,tools=st.columns([1.0,1.25])
+        with tools:
+            st.markdown("#### "+t("New invoice"))
             uploaded=st.file_uploader(t("Invoice image"),type=["png","jpg","jpeg"],key="invoice_upload")
-            if st.checkbox(t("Camera"),key="camera_enabled"):
+            camera_enabled=st.toggle(t("Camera"),key="camera_enabled")
+            if camera_enabled:
                 capture=st.camera_input(t("Invoice image"),key="camera_capture")
                 if capture:uploaded=capture
             a,b=st.columns(2)
@@ -247,9 +249,12 @@ def invoices_page(store,token,state,stock):
                         except Exception as error:
                             if isinstance(error,(RuntimeError,ValueError)):st.error(str(error)[:1000])
                             else:show_error(error)
-        with right:
-            if uploaded:st.image(uploaded.getvalue(),width="stretch")
-            else:st.markdown(section_html("Review","Draft hint"),unsafe_allow_html=True)
+        with preview:
+            st.markdown("#### "+t("Invoice preview"))
+            if uploaded:
+                st.image(uploaded.getvalue(),width="stretch")
+            else:
+                st.markdown('<div class="gp-invoice-empty">'+t("Invoice preview hint")+'</div>',unsafe_allow_html=True)
 
     section("Drafts")
     drafts=store.drafts(token)
@@ -292,9 +297,7 @@ def invoices_page(store,token,state,stock):
             total=float(pd.to_numeric(edited["quantity"],errors="coerce").fillna(0).sum())
             st.caption(f"{t('Items')}: {len(edited)}   |   {t('Total quantity')}: {total:.1f}")
             st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
-            duplicate_action=st.selectbox(t("Duplicate action"),["ignore","overwrite"],format_func=lambda x:t("Ignore duplicate" if x=="ignore" else "Overwrite if changed"),key="duplicate_"+suffix)
-            st.caption(t("Duplicate invoice hint"))
-            review_checked=st.checkbox(t("Confirm review"),key="checked_"+suffix)
+            duplicate_action=st.selectbox(t("Duplicate action"),["ignore","overwrite"],format_func=lambda x:t("Ignore duplicate" if x=="ignore" else "Overwrite if changed"),key="duplicate_"+suffix,help=t("Duplicate invoice hint"))
             password=st.text_input(t("Approval password"),type="password",key="password_invoice_"+suffix)
             a,b=st.columns(2)
             save=a.form_submit_button(t("Save draft"),width="stretch")
@@ -307,7 +310,6 @@ def invoices_page(store,token,state,stock):
                     if save:
                         store.save_draft(token,selected,updated,draft["version"]);success()
                     else:
-                        if not review_checked:raise AppError("Confirm review")
                         changes=match_invoice_lines(updated["items"],store.stock(token),kind)
                         duplicate=store.invoice_duplicate(token,reference,changes,updated)
                         if duplicate.get("exists"):
@@ -613,21 +615,53 @@ def settings_page(store,token,state,stock,actor):
                 except Exception as error:show_error(error)
 
 
+def _language_picker(key):
+    selected=st.segmented_control("Language / اللغة",["ar","en"],
+        default=st.session_state.get("ui_language","ar"),
+        format_func=lambda x:"العربية" if x=="ar" else "English",
+        key=key,label_visibility="collapsed") or st.session_state.get("ui_language","ar")
+    if selected!=st.session_state.get("ui_language","ar"):
+        st.session_state["ui_language"]=selected
+        st.rerun()
+
+
+def sidebar_navigation(store,token,actor,stamp):
+    nav=["Dashboard","Stock","Invoices","Movements","Analysis","Closing","Settings"]
+    desired=st.session_state.get("page","Dashboard")
+    if desired not in nav:desired="Dashboard"
+    if st.session_state.get("sidebar_nav")!=desired:
+        st.session_state["sidebar_nav"]=desired
+    icons={"Dashboard":"⌂","Stock":"▦","Invoices":"▤","Movements":"⇄","Analysis":"◫","Closing":"✓","Settings":"⚙"}
+    with st.sidebar:
+        st.image(ROOT/"assets/golden_palace.jpg",width=220)
+        st.markdown('<div class="gp-sidebar-title">'+t("Inventory")+'</div>',unsafe_allow_html=True)
+        st.caption(t("Warehouse workspace"))
+        page=st.radio(t("Navigation"),nav,key="sidebar_nav",label_visibility="collapsed",
+            format_func=lambda value:f"{icons[value]}  {t(value)}")
+        if page!=st.session_state.get("page"):
+            st.session_state["page"]=page
+        st.divider()
+        st.markdown(status_html(actor,stamp),unsafe_allow_html=True)
+        _language_picker("sidebar_language")
+        if st.button(t("Refresh"),width="stretch",key="sidebar_refresh"):
+            get_shell.clear();get_analysis.clear();st.rerun()
+        if st.button(t("Sign out"),width="stretch",key="sidebar_signout"):
+            try:store.logout(token)
+            finally:
+                st.session_state.clear();st.rerun()
+    return page
+
+
 def main():
     if "ui_language" not in st.session_state:
         st.session_state["ui_language"]="ar"
-    selected_lang=st.segmented_control("Language / اللغة",["ar","en"],
-        default=st.session_state["ui_language"],format_func=lambda x:"العربية" if x=="ar" else "English",
-        key="language_switch",label_visibility="collapsed") or st.session_state["ui_language"]
-    if selected_lang!=st.session_state["ui_language"]:
-        st.session_state["ui_language"]=selected_lang
-        st.rerun()
     set_language(st.session_state["ui_language"])
     st.markdown(language_marker(),unsafe_allow_html=True)
-    st.markdown(brand_html(),unsafe_allow_html=True)
+
     if st.session_state.pop("wipe_passwords",False):
         for key in list(st.session_state):
             if key.startswith("password_") or key=="login_password":st.session_state.pop(key,None)
+
     try:
         config=dict(st.secrets.get("database",{}))
         auth=dict(st.secrets.get("auth",{}))
@@ -636,13 +670,19 @@ def main():
         store=get_store(json.dumps(config,sort_keys=True))
         store.initialize(auth.get("bootstrap_username","admin"),auth.get("bootstrap_password",""),app_config.get("timezone","Asia/Damascus"))
     except Exception as error:
+        st.markdown(brand_html(),unsafe_allow_html=True)
         if isinstance(error,AppError):st.warning(t(str(error)))
         else:show_error(error)
         st.info("Setup: run sql/setup.sql in Supabase, then copy secrets.example.toml into Streamlit Secrets and fill your own database credentials. No local fallback is enabled.")
         st.code("database.host / database.user / database.password / database.dbname\nauth.bootstrap_username / auth.bootstrap_password",language="text")
         return
+
     token=st.session_state.get("token")
     if not token:
+        with st.sidebar:
+            st.markdown("### Language / اللغة")
+            _language_picker("login_language")
+        st.markdown(brand_html(),unsafe_allow_html=True)
         with st.container(key="login"):
             section("Sign in")
             with st.form("login"):
@@ -656,6 +696,7 @@ def main():
                     except Exception as error:show_error(error)
             st.caption(t("Cloud hint"))
         return
+
     try:
         database_id=str(store.engine.url.render_as_string(hide_password=True))
         token_hash=hashlib.sha256(token.encode()).hexdigest()[:24]
@@ -669,24 +710,13 @@ def main():
         show_error(error)
         if st.button(t("Refresh")):st.rerun()
         return
-    a,b,c=st.columns([5,1,1])
+
     stamp=aware(state["updated_at"]).astimezone(store.tz).strftime("%Y-%m-%d %H:%M:%S")
-    a.markdown(status_html(actor,stamp),unsafe_allow_html=True)
-    if b.button(t("Refresh"),width="stretch",key="global_refresh"):
-        get_shell.clear(); get_analysis.clear(); st.rerun()
-    with c.popover(t("Account"),width="stretch"):
-        st.write(actor["display_name"]+" / "+t(actor["role"]))
-        if st.button(t("Sign out"),width="stretch"):
-            try:store.logout(token)
-            finally:
-                st.session_state.clear()
-                st.rerun()
+    page=sidebar_navigation(store,token,actor,stamp)
+
     flash=st.session_state.pop("flash",None)
     if flash:st.success(flash)
-    nav=["Dashboard","Stock","Invoices","Movements","Analysis","Closing","Settings"]
-    if st.session_state.get("page") not in nav:st.session_state["page"]="Dashboard"
-    with st.container(key="navigation"):
-        page=st.segmented_control(t("Inventory"),nav,format_func=t,key="page",label_visibility="collapsed",width="stretch") or "Dashboard"
+
     try:
         if page=="Dashboard":dashboard_page(store,token,state,stock,daily,actor)
         elif page=="Stock":stock_page(store,token,state,stock)
