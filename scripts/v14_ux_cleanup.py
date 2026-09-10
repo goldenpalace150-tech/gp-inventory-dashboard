@@ -142,3 +142,4 @@ if '# ---- v14 operator UX cleanup ----' not in text:
 path.write_text(text, encoding="utf-8")
 
 print("v14 UX cleanup applied")
+# validation trigger
