@@ -1,0 +1,45 @@
+name: V16 invoice and stock cleanup
+on:
+  push:
+    branches: [warehouse-v16-invoice-cleanup]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply v16 updater
+        run: python scripts/v16_invoice_cleanup.py
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+      - name: Compile
+        run: python -m compileall -q inventory_tracker.py gp_ui.py gp_store.py gp_ocr.py invoice_ocr_worker.py
+      - name: Regression suite
+        run: python -m pytest -o addopts='' -q
+      - name: Validate v16 markers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('inventory_tracker.py').read_text()
+          ui=Path('gp_ui.py').read_text()
+          store=Path('gp_store.py').read_text()
+          worker=Path('invoice_ocr_worker.py').read_text()
+          assert 'section("Drafts")' not in app
+          assert 'section("Invoice review")' in app
+          assert 'failed_empty=[d for d in drafts' in app
+          assert 'GP-CLOUD-v16' in ui
+          assert 'GP-OCR-WAREHOUSE-v16' in worker
+          assert 'current_stock_rebuilt' in store
+          print('v16 markers OK')
+          PY
+      - name: Commit validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add inventory_tracker.py gp_ui.py gp_store.py gp_ocr.py invoice_ocr_worker.py tests/test_core_and_ocr.py
+          git diff --cached --quiet || git commit -m 'feat: simplify invoice flow and rebuild stock after report deletion v16'
+          git push
