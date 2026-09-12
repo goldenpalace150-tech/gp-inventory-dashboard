@@ -305,3 +305,28 @@ def test_usernames_have_no_character_or_minimum_length_rule():
     for username in ["x","موظف مخزن","user name","@"]:
         s.create_user(t,username,"p","store",username)
         assert s.login(username,"p")
+
+
+def test_delete_invoice_after_last_baseline_removed():
+    s=Store.for_tests();s.initialize(password=PASS);t=s.login("admin",PASS)
+    s.replace_stock(t,PASS,sample_stock(),"baseline-cleanup",s.state(t)["revision"])
+    s.post(t,PASS,change(3),"invoice-cleanup",source="INVOICE",reference="112233",image_hash="c"*64)
+    catalog=s.deletion_catalog(t)
+    assert catalog["stock_reports"]
+    baseline_id=catalog["stock_reports"][0]["operation_id"]
+    s.delete_stock_report(t,PASS,baseline_id)
+    assert s.stock(t).empty
+    assert not s.ledger(t).empty
+    s.delete_invoice(t,PASS,"112233")
+    assert s.ledger(t).empty
+    assert s.recent_invoices(t)==[]
+
+def test_delete_manual_movement_after_last_baseline_removed():
+    s=Store.for_tests();s.initialize(password=PASS);t=s.login("admin",PASS)
+    s.replace_stock(t,PASS,sample_stock(),"baseline-cleanup-manual",s.state(t)["revision"])
+    op=s.post(t,PASS,change(1),"movement-cleanup",reason="cleanup",delivery_note=True)
+    baseline_id=s.deletion_catalog(t)["stock_reports"][0]["operation_id"]
+    s.delete_stock_report(t,PASS,baseline_id)
+    assert s.stock(t).empty
+    s.delete_movement(t,PASS,op)
+    assert s.ledger(t).empty

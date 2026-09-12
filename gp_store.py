@@ -879,24 +879,33 @@ class Store:
             deltas[key]=deltas.get(key,Decimal(0))+delta
 
         stock=self.tables["stock_state"]
-        stock_rows=c.execute(select(stock).where(stock.c.item_key.in_(list(deltas))).order_by(stock.c.item_key).with_for_update()).mappings().all()
-        current={r["item_key"]:dict(r) for r in stock_rows}
-        if set(current)!=set(deltas):raise AppError("An item is missing from the current stock")
+        baselines=self.tables["baseline_snapshots"]
+        has_baseline=bool(c.execute(select(baselines.c.operation_id).limit(1)).first())
         now=utcnow()
-        for key,delta in deltas.items():
-            new_current=decimal_qty(current[key]["quantity"])+delta
-            if new_current<0:raise AppError("Cannot delete because later movements depend on this quantity")
-            subsequent=c.execute(select(ledger).where(
-                ledger.c.item_key==key,ledger.c.ledger_id>max_target_id
-            ).order_by(ledger.c.ledger_id).with_for_update()).mappings().all()
-            for row in subsequent:
-                new_before=decimal_qty(row["quantity_before"])+delta
-                new_after=decimal_qty(row["quantity_after"])+delta
-                if new_before<0 or new_after<0:
-                    raise AppError("Cannot delete because later movements depend on this quantity")
-                c.execute(update(ledger).where(ledger.c.ledger_id==row["ledger_id"]).values(
-                    quantity_before=new_before,quantity_after=new_after))
-            c.execute(update(stock).where(stock.c.item_key==key).values(quantity=new_current,updated_at=now))
+        if has_baseline:
+            stock_rows=c.execute(select(stock).where(stock.c.item_key.in_(list(deltas))).order_by(stock.c.item_key).with_for_update()).mappings().all()
+            current={r["item_key"]:dict(r) for r in stock_rows}
+            if set(current)!=set(deltas):raise AppError("An item is missing from the current stock")
+            for key,delta in deltas.items():
+                new_current=decimal_qty(current[key]["quantity"])+delta
+                if new_current<0:raise AppError("Cannot delete because later movements depend on this quantity")
+                subsequent=c.execute(select(ledger).where(
+                    ledger.c.item_key==key,ledger.c.ledger_id>max_target_id
+                ).order_by(ledger.c.ledger_id).with_for_update()).mappings().all()
+                for row in subsequent:
+                    new_before=decimal_qty(row["quantity_before"])+delta
+                    new_after=decimal_qty(row["quantity_after"])+delta
+                    if new_before<0 or new_after<0:
+                        raise AppError("Cannot delete because later movements depend on this quantity")
+                    c.execute(update(ledger).where(ledger.c.ledger_id==row["ledger_id"]).values(
+                        quantity_before=new_before,quantity_after=new_after))
+                c.execute(update(stock).where(stock.c.item_key==key).values(quantity=new_current,updated_at=now))
+        else:
+            # If every warehouse baseline has already been removed, there is no
+            # current stock truth to reverse. The remaining ledger rows are only
+            # historical cleanup records, so allow deleting them without requiring
+            # stock_state rows that intentionally no longer exist.
+            c.execute(delete(stock))
 
         invoice_reference=""; image_hash=None
         if expected_source=="INVOICE":
@@ -914,7 +923,8 @@ class Store:
         c.execute(delete(ledger).where(ledger.c.operation_id==op["operation_id"]))
         c.execute(delete(operations).where(operations.c.operation_id==op["operation_id"]))
         action="DELETE_INVOICE" if expected_source=="INVOICE" else "DELETE_MOVEMENT"
-        self._audit(c,actor["username"],action,{"operation_id":op["operation_id"],"invoice_reference":invoice_reference,"line_count":len(target)})
+        self._audit(c,actor["username"],action,{"operation_id":op["operation_id"],"invoice_reference":invoice_reference,
+            "line_count":len(target),"stock_adjusted":bool(has_baseline)})
         self._touch(c)
         return op["operation_id"]
 
