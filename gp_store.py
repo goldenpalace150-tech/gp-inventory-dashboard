@@ -295,6 +295,19 @@ class Store:
         conn.execute(insert(self.tables["audit_log"]).values(event_id=str(uuid.uuid4()),
             created_at=utcnow(), username=username, action=action, details=clean_json(details or {})))
 
+    def _repair_orphan_stock_without_baseline(self, conn):
+        baselines=self.tables["baseline_snapshots"]
+        stock=self.tables["stock_state"]
+        if conn.execute(select(baselines.c.operation_id).limit(1)).first():
+            return False
+        stale_count=conn.execute(select(func.count()).select_from(stock)).scalar_one()
+        if not stale_count:
+            return False
+        conn.execute(delete(stock))
+        self._audit(conn,"system","REPAIR_ORPHAN_STOCK_WITHOUT_BASELINE",{"rows_removed":int(stale_count)})
+        self._touch(conn)
+        return True
+
     def initialize(self, username="admin", password="", timezone_name="Asia/Damascus"):
         with self.engine.begin() as c:
             state = self._lock(c)
@@ -310,6 +323,7 @@ class Store:
                 c.execute(update(self.tables["app_state"]).where(self.tables["app_state"].c.id==1).values(timezone=timezone_name))
                 self.tz = ZoneInfo(timezone_name)
                 self._audit(c, username, "ADMIN_BOOTSTRAP")
+            self._repair_orphan_stock_without_baseline(c)
 
     def login(self, username, password, session_hours=12):
         username = str(username).strip()
@@ -413,6 +427,9 @@ class Store:
     def stock(self, token):
         with self.engine.connect() as c:
             self._actor(c,token)
+            baselines=self.tables["baseline_snapshots"]
+            if not c.execute(select(baselines.c.operation_id).limit(1)).first():
+                return self.stock_frame([])
             rows=c.execute(select(self.tables["stock_state"]).order_by(self.tables["stock_state"].c.item_name)).mappings().all()
             return self.stock_frame(rows)
 

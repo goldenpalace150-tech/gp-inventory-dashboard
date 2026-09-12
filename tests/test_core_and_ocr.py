@@ -99,6 +99,29 @@ def test_delete_stock_report_rebuilds_then_clears_current_stock():
     assert s.stock(t).empty
 
 
+
+def test_stock_reader_hides_orphan_balance_without_warehouse_report():
+    from sqlalchemy import delete
+    s=Store.for_tests();pw="Test-Password-2026";s.initialize(password=pw);t=s.login("admin",pw)
+    stock=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"010716",COL_NAME:"Camera",COL_QTY:10}]))
+    s.replace_stock(t,pw,stock,"base-orphan-read",s.state(t)["revision"],source_name="orphan.xlsx")
+    with s.engine.begin() as c:c.execute(delete(s.tables["baseline_snapshots"]))
+    assert s.stock(t).empty
+
+
+def test_initialize_repairs_orphan_stock_left_by_old_delete_behavior():
+    from sqlalchemy import delete,select,func
+    s=Store.for_tests();pw="Test-Password-2026";s.initialize(password=pw);t=s.login("admin",pw)
+    stock=ensure_unique_stock_keys(pd.DataFrame([{COL_CODE:"010716",COL_NAME:"Camera",COL_QTY:10}]))
+    s.replace_stock(t,pw,stock,"base-orphan-repair",s.state(t)["revision"],source_name="orphan.xlsx")
+    with s.engine.begin() as c:
+        c.execute(delete(s.tables["baseline_snapshots"]))
+        assert c.execute(select(func.count()).select_from(s.tables["stock_state"])).scalar_one()==1
+    s.initialize(password=pw)
+    with s.engine.connect() as c:
+        assert c.execute(select(func.count()).select_from(s.tables["stock_state"])).scalar_one()==0
+        assert c.execute(select(func.count()).select_from(s.tables["audit_log"]).where(s.tables["audit_log"].c.action=="REPAIR_ORPHAN_STOCK_WITHOUT_BASELINE")).scalar_one()==1
+
 def test_invoice_ui_hides_draft_workflow_and_cleans_failed_scans():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
     assert 'section("Drafts")' not in source
