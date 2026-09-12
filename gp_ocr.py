@@ -13,7 +13,7 @@ import threading
 from gp_core import normalize_item_code
 from gp_invoice import canonicalize_invoice_rows
 
-OCR_BUILD = "GP-OCR-WAREHOUSE-v16.5"
+OCR_BUILD = "GP-OCR-WAREHOUSE-v16.6"
 OCR_TIMEOUT_SECONDS = 90
 OCR_MAX_WORKER_MB = 360
 OCR_MAX_UPLOAD_BYTES = 12 * 1024 * 1024

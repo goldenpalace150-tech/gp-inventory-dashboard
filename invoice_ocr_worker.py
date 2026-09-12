@@ -29,7 +29,7 @@ for _name in (
 os.environ["MALLOC_ARENA_MAX"] = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-BUILD = "GP-OCR-WAREHOUSE-v16.5"
+BUILD = "GP-OCR-WAREHOUSE-v16.6"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 MAX_SOURCE_SIDE = 1200
@@ -189,18 +189,18 @@ def run_arabic_ocr(array):
 
 
 def run_header_ocr(array):
-    """Read only the document title + recipient/customer strip in Arabic."""
+    """Read the Golden Palace document title + recipient strip in Arabic.
+
+    A focused crop is more reliable than sending the logo, phone numbers and most
+    of the page to the Arabic recognizer. The supplied delivery note prints
+    "مذكرة تسليم (إخراج مواد)" in this band.
+    """
     global _engine
-    # Numeric recognition is finished before this call. Release that ONNX session
-    # before loading Arabic recognition to stay inside Streamlit Cloud memory.
     _engine = None
     gc.collect()
     height, width = array.shape[:2]
-    # The movement title (for example: مذكرة تسليم / إخراج مواد) is printed
-    # close to the top of the Golden Palace invoice. Start much earlier than the
-    # previous 20% crop while still including the recipient/customer line below.
-    left, top = int(width * 0.02), int(height * 0.04)
-    right, bottom = int(width * 0.98), int(height * 0.46)
+    left, top = int(width * 0.04), int(height * 0.15)
+    right, bottom = int(width * 0.96), int(height * 0.42)
     crop = array[top:bottom, left:right]
     if crop.size == 0:
         return []
@@ -240,6 +240,10 @@ def parse_header_metadata(boxes, width, height):
     elif has_phrase("اخراج"):
         movement = "OUT"
     elif has_phrase("ادخال"):
+        movement = "IN"
+    elif has_phrase("تسليم"):
+        movement = "OUT"
+    elif has_phrase("استلام"):
         movement = "IN"
 
     customer = ""
@@ -411,9 +415,9 @@ def extract_invoice(image_path):
         "تمت قراءة رموز المواد والكميات ورقم الفاتورة آلياً. راجع كل سطر قبل الاعتماد.",
     ]
     if not movement_type:
-        warnings.append("نوع الحركة غير مؤكد؛ أعد تصوير الفاتورة بصورة أوضح.")
+        warnings.append("نوع الحركة غير مؤكد؛ اختر نوع الحركة يدوياً في المراجعة.")
     if header_failed:
-        warnings.append("تعذر قراءة بيانات رأس الفاتورة؛ أعد تصوير الفاتورة بصورة أوضح.")
+        warnings.append("تعذر قراءة بيانات رأس الفاتورة؛ يمكن اختيار نوع الحركة يدوياً في المراجعة.")
 
     items = []
     for index, row in enumerate(rows):

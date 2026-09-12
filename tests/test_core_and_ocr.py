@@ -8,7 +8,7 @@ from gp_core import *
 from gp_store import Store,utcnow
 from gp_reports import excel_bytes
 from gp_ocr import _run_ocr_worker,_ocr_scan_lock
-from invoice_ocr_worker import parse_codes,parse_quantity,parse_summary
+from invoice_ocr_worker import parse_codes,parse_quantity,parse_summary,parse_header_metadata
 from PIL import Image
 
 
@@ -222,6 +222,20 @@ def test_daily_report_empty_is_valid():
 
 
 
+
+def test_delivery_word_fallback_detects_out_movement():
+    boxes=[{"text":"يرجى تسليم المواد المذكورة أدناه","score":.90,"x":500,"y":300,"region":"header"}]
+    movement,customer=parse_header_metadata(boxes,1000,1200)
+    assert movement=="OUT"
+
+
+def test_auto_invoice_allows_manual_movement_only_when_ocr_misses_it():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'movement_fallback=auto_invoice and current_kind not in ("IN","OUT")' in source
+    assert 'if movement_fallback:st.caption(t("Movement type manual fallback"))' in source
+    assert 'if kind not in ("IN","OUT"):raise AppError("Movement type required")' in source
+    assert 'Automatic movement type required' not in source
+
 def test_auto_invoice_metadata_is_read_only_and_duplicates_are_automatic():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
     assert 'auto_invoice=bool(draft.get("image_hash"))' in source
@@ -231,7 +245,8 @@ def test_auto_invoice_metadata_is_read_only_and_duplicates_are_automatic():
     assert 'if duplicate.get("identical"):' in source
     assert 'store.replace_invoice(' in source
     assert 'Automatic invoice number required' in source
-    assert 'Automatic movement type required' in source
+    assert 'movement_fallback=auto_invoice and current_kind not in ("IN","OUT")' in source
+    assert 'Movement type required' in source
 
 def test_invoice_entry_is_only_auto_or_manual():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()

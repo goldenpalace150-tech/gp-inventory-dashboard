@@ -309,13 +309,15 @@ def invoices_page(store,token,state,stock):
             driver=c.text_input(t("Driver"),value=str(payload.get("driver","")),key="driver_"+suffix)
             kinds=["","OUT","IN"]
             current_kind=payload.get("movement_type","") if payload.get("movement_type","") in kinds else ""
-            if auto_invoice:
-                d.text_input(t("Movement type"),value=t(current_kind) if current_kind else t("Not detected"),key="kind_auto_"+suffix,disabled=True)
+            movement_fallback=auto_invoice and current_kind not in ("IN","OUT")
+            if auto_invoice and not movement_fallback:
+                d.text_input(t("Movement type"),value=t(current_kind),key="kind_auto_"+suffix,disabled=True)
                 kind=current_kind
             else:
                 kind=d.selectbox(t("Movement type"),kinds,index=kinds.index(current_kind),format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
-            if auto_invoice and (not reference.strip() or kind not in ("IN","OUT")):
-                st.warning(t("Automatic invoice fields incomplete"))
+                if movement_fallback:st.caption(t("Movement type manual fallback"))
+            if auto_invoice and not reference.strip():
+                st.warning(t("Automatic invoice number missing"))
             st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
             edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,disabled=["item_name"],
                 column_config={"item_code":st.column_config.TextColumn(COL_CODE),"item_name":st.column_config.TextColumn(COL_NAME),
@@ -334,7 +336,7 @@ def invoices_page(store,token,state,stock):
                 try:
                     canonical_rows,_=canonicalize_invoice_rows(edited.to_dict("records"),stock,drop_unknown=False)
                     if auto_invoice and not reference.strip():raise AppError("Automatic invoice number required")
-                    if auto_invoice and kind not in ("IN","OUT"):raise AppError("Automatic movement type required")
+                    if kind not in ("IN","OUT"):raise AppError("Movement type required")
                     updated=dict(payload);updated.update(invoice_number=reference.strip(),movement_type=kind,
                         customer_name=customer.strip(),driver=driver.strip(),items=clean_json(canonical_rows))
                     if save:

@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v16.5"
+BUILD = "GP-CLOUD-v16.6"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -200,6 +200,14 @@ AR.update({
     "Automatic invoice fields incomplete": "لم تكتمل القراءة التلقائية لرأس الفاتورة. أعد التصوير بصورة أوضح قبل الاعتماد.",
     "Automatic invoice number required": "تعذر قراءة رقم الفاتورة تلقائياً. أعد التصوير بصورة أوضح.",
     "Automatic movement type required": "تعذر قراءة نوع الحركة تلقائياً. أعد التصوير بصورة أوضح.",
+})
+
+
+# ---- v16.6 movement OCR/manual fallback ----
+AR.update({
+    "Movement type manual fallback": "تعذر تحديد نوع الحركة تلقائياً. اختر إدخال أو إخراج يدوياً.",
+    "Automatic invoice number missing": "تعذر قراءة رقم الفاتورة تلقائياً. أعد التصوير بصورة أوضح.",
+    "Movement type required": "اختر نوع الحركة: إدخال أو إخراج.",
 })
 
 def set_language(value):
