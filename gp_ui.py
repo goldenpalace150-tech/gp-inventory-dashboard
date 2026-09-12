@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v16.2"
+BUILD = "GP-CLOUD-v16.3"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -172,6 +172,15 @@ AR.update({
     "Cancel invoice": "إلغاء الفاتورة",
 })
 
+
+
+# ---- v16.3 movement-history cleanup ----
+AR.update({
+    "Delete movement history report": "حذف ملف حركة المادة",
+    "Movement history delete hint": "يحذف ملف حركة المادة المستورد وبيانات التحليل التاريخية فقط، ولا يغيّر رصيد المستودع الحالي.",
+    "No movement history report": "لا يوجد ملف حركة مادة مستورد.",
+    "Rows": "سطر",
+})
 
 def set_language(value):
     global LANGUAGE

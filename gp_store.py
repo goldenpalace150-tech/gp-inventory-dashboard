@@ -827,6 +827,8 @@ class Store:
             invoices_by_op={r["operation_id"]:dict(r) for r in invoice_rows}
             baselines=self.tables["baseline_snapshots"]
             baseline_rows=c.execute(select(baselines).order_by(baselines.c.created_at.desc()).limit(30)).mappings().all()
+            state_row=c.execute(select(self.tables["app_state"]).where(self.tables["app_state"].c.id==1)).mappings().one()
+            history_count=c.execute(select(func.count()).select_from(self.tables["imported_movement_history"])).scalar_one()
 
         invoices=[]; movements=[]
         for op in op_rows:
@@ -851,7 +853,10 @@ class Store:
             payload=row["stock"] if isinstance(row["stock"],dict) else {}
             reports.append(dict(operation_id=row["operation_id"],created_at=row["created_at"],username=row["username"],
                 source_name=str(payload.get("source_name", "") or ""),item_count=len(payload.get("after",[]) or [])))
-        return {"invoices":invoices,"movements":movements,"stock_reports":reports}
+        history_report=None
+        if history_count or state_row.get("history_hash"):
+            history_report={"row_count":int(history_count),"as_of":state_row.get("history_as_of")}
+        return {"invoices":invoices,"movements":movements,"stock_reports":reports,"history_report":history_report}
 
     def _delete_posted_operation_tx(self,c,actor,operation_id,expected_source):
         operations=self.tables["operations"]; ledger=self.tables["movement_ledger"]
@@ -921,6 +926,21 @@ class Store:
         with self.engine.begin() as c:
             self._lock(c); actor=self._actor(c,token,password,admin=True)
             return self._delete_posted_operation_tx(c,actor,operation_id,"MANUAL")
+
+    def delete_movement_history(self,token,password):
+        """Delete imported movement history without changing current stock."""
+        with self.engine.begin() as c:
+            self._lock(c); actor=self._actor(c,token,password,admin=True)
+            history=self.tables["imported_movement_history"]
+            count=c.execute(select(func.count()).select_from(history)).scalar_one()
+            state=self.tables["app_state"]
+            current=c.execute(select(state.c.history_hash,state.c.history_as_of).where(state.c.id==1).with_for_update()).mappings().one()
+            if not count and not current["history_hash"]:raise AppError("Record not found")
+            c.execute(delete(history))
+            c.execute(update(state).where(state.c.id==1).values(history_as_of=None,history_hash=None))
+            self._audit(c,actor["username"],"DELETE_MOVEMENT_HISTORY",{"rows_removed":int(count)})
+            self._touch(c)
+            return int(count)
 
     def delete_stock_report(self,token,password,operation_id):
         """Delete a warehouse baseline and rebuild the current stock truth.

@@ -548,6 +548,22 @@ def deletion_panel(store,token):
                 except Exception as error:show_error(error)
     else:st.info(t("No warehouse reports"))
 
+    st.divider()
+    st.markdown("#### "+t("Delete movement history report"))
+    history_report=catalog.get("history_report")
+    if history_report:
+        details=f"{history_report['row_count']:,} {t('Rows')}"
+        if history_report.get("as_of"):details += " | "+t("History cutoff")+": "+_local_stamp(store,history_report["as_of"])
+        st.caption(details)
+        with st.form("delete_history_report_form"):
+            st.caption(t("Movement history delete hint"))
+            confirmed=st.checkbox(t("Confirm delete"),key="delete_history_report_confirm")
+            password=st.text_input(t("Approval password"),type="password",key="password_delete_history")
+            if st.form_submit_button(t("Delete movement history report"),type="primary",disabled=not confirmed):
+                try:store.delete_movement_history(token,password);success(message="Deleted")
+                except Exception as error:show_error(error)
+    else:st.info(t("No movement history report"))
+
 
 def settings_page(store,token,state,stock,actor):
     section("Settings")
