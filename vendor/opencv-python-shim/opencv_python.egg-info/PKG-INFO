@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: opencv-python
-Version: 4.11.0.86
-Summary: Compatibility shim that satisfies RapidOCR while using opencv-python-headless
-Requires-Python: >=3.8
-Requires-Dist: opencv-python-headless==4.11.0.86
