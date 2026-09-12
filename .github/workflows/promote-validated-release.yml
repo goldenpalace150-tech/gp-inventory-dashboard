@@ -1,0 +1,69 @@
+name: Promote validated release
+
+on:
+  push:
+    branches:
+      - 'release/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gp-inventory-release
+  cancel-in-progress: false
+
+jobs:
+  validate-and-promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+
+      - name: Compile application
+        run: python -m compileall -q inventory_tracker.py gp_ui.py gp_store.py gp_ocr.py invoice_ocr_worker.py
+
+      - name: Regression suite
+        run: python -m pytest -o addopts='' -q
+
+      - name: Verify release build source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+
+          ui = Path('gp_ui.py').read_text(encoding='utf-8')
+          tree = ast.parse(ui)
+          values = []
+          for node in tree.body:
+              if isinstance(node, ast.Assign):
+                  for target in node.targets:
+                      if isinstance(target, ast.Name) and target.id == 'BUILD':
+                          values.append(node.value.value if isinstance(node.value, ast.Constant) else None)
+          assert len(values) == 1, f'BUILD must have exactly one source of truth, found {values}'
+          assert isinstance(values[0], str) and values[0].startswith('GP-CLOUD-v')
+
+          app = Path('inventory_tracker.py').read_text(encoding='utf-8')
+          assert 'from gp_ui import (BUILD,' in app
+          print('validated release:', values[0])
+          PY
+
+      - name: Require release branch to be based on current main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor origin/main HEAD || {
+            echo 'Release branch is not based on current main. Rebase/recreate it before deployment.'
+            exit 1
+          }
+
+      - name: Promote exact validated commit to live main
+        run: |
+          git push origin HEAD:main
+          echo "Promoted $(git rev-parse HEAD) to main"
