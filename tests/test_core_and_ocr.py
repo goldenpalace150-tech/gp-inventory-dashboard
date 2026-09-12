@@ -292,3 +292,10 @@ def test_new_user_form_has_no_approval_password_and_backend_uses_session_only():
     assert 'store.create_user(token,username,newpass,role,display)' in app
     assert 'def create_user(self,token,username,new_password,role,display_name=""):' in store
     assert 'actor=self._actor(c,token,admin=True)' in store
+
+
+def test_store_cache_is_versioned_by_build_and_stale_apperror_is_shown_safely():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'def get_store(settings_json,build):' in source
+    assert 'get_store(json.dumps(config,sort_keys=True),BUILD)' in source
+    assert 'type(error).__name__=="AppError"' in source

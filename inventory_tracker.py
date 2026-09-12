@@ -37,7 +37,10 @@ LOG=logging.getLogger("golden_palace")
 
 
 def show_error(error):
-    if isinstance(error,AppError):
+    # Streamlit can retain cached objects created by the previous app module after
+    # a hot code pull. Their AppError class has the same name but a different
+    # Python class identity, so accept both the current class and that stale copy.
+    if isinstance(error,AppError) or type(error).__name__=="AppError":
         st.error(t(str(error)))
     else:
         reference=str(uuid.uuid4())[:8]
@@ -51,7 +54,10 @@ def show_error(error):
 
 
 @st.cache_resource(show_spinner=False)
-def get_store(settings_json):
+def get_store(settings_json,build):
+    # `build` is intentionally part of the cache key. After every release this
+    # creates a fresh Store instance so changed method signatures/classes cannot
+    # be mixed with a Store object cached by the previous Streamlit process.
     return Store.from_settings(json.loads(settings_json))
 
 
@@ -750,7 +756,7 @@ def main():
         auth=dict(st.secrets.get("auth",{}))
         app_config=dict(st.secrets.get("app",{}))
         if not config:raise AppError("Complete the database settings in Streamlit Secrets")
-        store=get_store(json.dumps(config,sort_keys=True))
+        store=get_store(json.dumps(config,sort_keys=True),BUILD)
         store.initialize(auth.get("bootstrap_username","admin"),auth.get("bootstrap_password",""),app_config.get("timezone","Asia/Damascus"))
     except Exception as error:
         st.markdown(brand_html(),unsafe_allow_html=True)
