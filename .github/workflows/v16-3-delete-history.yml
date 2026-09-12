@@ -2,6 +2,7 @@ name: V16.3 delete movement history
 on:
   push:
     branches: [feature/delete-movement-history-v16-3]
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
