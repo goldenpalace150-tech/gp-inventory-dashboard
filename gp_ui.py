@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v16.12"
+BUILD = "GP-CLOUD-v16.13"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -234,6 +234,16 @@ AR.update({
 AR.update({
     "Username is required": "اسم المستخدم مطلوب.",
     "Username is too long": "اسم المستخدم طويل جداً.",
+})
+
+
+# ---- v16.13 stock upload mode after daily movements ----
+AR.update({
+    "Stock upload compare mode": "توجد حركات مسجلة اليوم؛ لن يتم استبدال رصيد المستودع بهذا الملف.",
+    "Stock upload compare mode hint": "سيتم استخدام التقرير للمقارنة فقط مع رصيد النظام الحالي. إذا أردت اعتماد رصيد بداية جديد، يجب رفعه قبل أول حركة في اليوم.",
+    "Open closing stock check": "فتح مطابقة نهاية اليوم",
+    "No current stock to compare": "لا يوجد رصيد حالي للمقارنة. يجب اعتماد رصيد بداية قبل بدء الحركات.",
+    "Set a new baseline before the first movement of the day": "لا يمكن استبدال رصيد البداية بعد تسجيل حركات اليوم. استخدم التقرير للمقارنة فقط أو اعتمد رصيد بداية في يوم جديد قبل أول حركة.",
 })
 
 def set_language(value):

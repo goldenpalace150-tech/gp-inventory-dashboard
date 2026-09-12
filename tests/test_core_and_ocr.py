@@ -307,3 +307,18 @@ def test_delete_confirmation_does_not_disable_form_submit_buttons():
     assert 'Delete movement"),type="primary",disabled=not confirmed' not in source
     assert 'Delete movement history report"),type="primary",disabled=not confirmed' not in source
     assert source.count('if not confirmed:raise AppError("Confirm delete")') >= 3
+
+
+def test_stock_upload_after_daily_movements_switches_to_compare_only():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'today_moves=store.ledger(token,store.today())' in source
+    assert 'if not today_moves.empty:' in source
+    assert 'Stock upload compare mode' in source
+    assert '_stock_reconciliation(stock,df,store.today())' in source
+    store_source=(Path(__file__).resolve().parents[1]/"gp_store.py").read_text()
+    assert 'Set a new baseline before the first movement of the day' in store_source
+
+def test_closing_and_settings_share_stock_reconciliation_helper():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'def _stock_reconciliation(expected_stock,counted,day):' in source
+    assert '_stock_reconciliation(stock,counted,day)' in source
