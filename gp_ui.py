@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v16.8"
+BUILD = "GP-CLOUD-v16.9"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -227,6 +227,13 @@ AR.update({
     "Difference": "الفرق",
     "Closing stock matches": "الجرد الفعلي مطابق لرصيد النظام.",
     "Closing stock differences found": "توجد فروقات بين الجرد الفعلي ورصيد النظام.",
+})
+
+
+# ---- v16.9 simple user credentials ----
+AR.update({
+    "Username is required": "اسم المستخدم مطلوب.",
+    "Username is too long": "اسم المستخدم طويل جداً.",
 })
 
 def set_language(value):

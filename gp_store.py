@@ -76,8 +76,8 @@ def decimal_qty(value, *, positive=False, normalize=False) -> Decimal:
 
 
 def password_hash(password: str, *, enforce_policy=True) -> str:
-    if enforce_policy and (len(password) < 12 or len(password) > 256):
-        raise AppError("Use a password of 12 to 256 characters")
+    # No password complexity/length policy. Store exactly what the operator enters.
+    password = str(password)
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF_ROUNDS)
     return "pbkdf2_sha256$%d$%s$%s" % (
@@ -87,9 +87,9 @@ def password_hash(password: str, *, enforce_policy=True) -> str:
 def password_matches(password: str, encoded: str) -> bool:
     try:
         algorithm, rounds, salt, target = encoded.split("$")
-        if algorithm != "pbkdf2_sha256" or not 100_000 <= int(rounds) <= 2_000_000 or len(password) > 256:
+        if algorithm != "pbkdf2_sha256" or not 100_000 <= int(rounds) <= 2_000_000:
             return False
-        value = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(salt), int(rounds))
+        value = hashlib.pbkdf2_hmac("sha256", str(password).encode(), base64.b64decode(salt), int(rounds))
         return hmac.compare_digest(value, base64.b64decode(target))
     except (ValueError, TypeError):
         return False
@@ -316,8 +316,11 @@ class Store:
             if c.execute(select(func.count()).select_from(users)).scalar_one() == 0:
                 if not password or "PASTE_" in password or "CHANGE_" in password:
                     raise AppError("Set a new bootstrap admin password in Secrets")
-                if not re.fullmatch(r"[A-Za-z0-9_.-]{3,80}", username):
-                    raise AppError("Use 3 to 80 letters, digits, dots or underscores for usernames")
+                username = str(username).strip()
+                if not username:
+                    raise AppError("Username is required")
+                if len(username) > 80:
+                    raise AppError("Username is too long")
                 ZoneInfo(timezone_name)
                 c.execute(insert(users).values(username=username, display_name=username, role="admin",
                     password_hash=password_hash(password), active=True, failed_attempts=0, created_at=utcnow()))
@@ -1068,7 +1071,8 @@ class Store:
 
     def create_user(self,token,password,username,new_password,role,display_name=""):
         username=str(username).strip()
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,80}",username):raise AppError("Use 3 to 80 letters, digits, dots or underscores for usernames")
+        if not username:raise AppError("Username is required")
+        if len(username)>80:raise AppError("Username is too long")
         if role not in ("admin","store"):raise AppError("Invalid role")
         hashed=password_hash(new_password)
         display_name=str(display_name or username)[:120]

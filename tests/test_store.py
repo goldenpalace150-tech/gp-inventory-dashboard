@@ -51,10 +51,13 @@ def test_password_hash_unique():
     assert not password_matches("wrong",a)
 
 
-def test_no_default_password():
-    s=Store.for_tests()
-    with pytest.raises(AppError):s.initialize(password="")
-    with pytest.raises(AppError):s.initialize(password="123")
+def test_simple_passwords_are_allowed_for_users():
+    s=Store.for_tests();s.initialize(password="admin-bootstrap")
+    t=s.login("admin","admin-bootstrap")
+    s.create_user(t,"admin-bootstrap","a","1","store","A")
+    assert s.login("a","1")
+    s.create_user(t,"admin-bootstrap","user name","","store","Blank Password")
+    assert s.login("user name","")
 
 
 def test_post_atomic_and_reload(env):
@@ -294,3 +297,11 @@ def test_postgres_lock_compiles():
 def test_cloud_configuration_never_allows_sqlite():
     with pytest.raises(AppError):Store.from_settings({"url":"sqlite:///inventory.db"})
     with pytest.raises(AppError):Store.from_settings({"host":"x","user":"x","password":"x","dbname":"x","sslmode":"disable"})
+
+
+def test_usernames_have_no_character_or_minimum_length_rule():
+    s=Store.for_tests();s.initialize(password="bootstrap")
+    t=s.login("admin","bootstrap")
+    for username in ["x","موظف مخزن","user name","@"]:
+        s.create_user(t,"bootstrap",username,"p","store",username)
+        assert s.login(username,"p")
