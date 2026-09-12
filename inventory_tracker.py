@@ -569,8 +569,10 @@ def deletion_panel(store,token):
             st.caption(t("Delete reverses warehouse quantity"))
             confirmed=st.checkbox(t("Confirm delete"),key="delete_invoice_confirm")
             password=st.text_input(t("Approval password"),type="password",key="password_delete_invoice")
-            if st.form_submit_button(t("Delete invoice"),type="primary",disabled=not confirmed):
-                try:store.delete_invoice(token,password,selected);success(message="Deleted")
+            if st.form_submit_button(t("Delete invoice"),type="primary"):
+                try:
+                    if not confirmed:raise AppError("Confirm delete")
+                    store.delete_invoice(token,password,selected);success(message="Deleted")
                 except Exception as error:show_error(error)
     else:st.info(t("No deletable invoices"))
 
@@ -585,8 +587,10 @@ def deletion_panel(store,token):
             st.caption(t("Delete reverses warehouse quantity"))
             confirmed=st.checkbox(t("Confirm delete"),key="delete_movement_confirm")
             password=st.text_input(t("Approval password"),type="password",key="password_delete_movement")
-            if st.form_submit_button(t("Delete movement"),type="primary",disabled=not confirmed):
-                try:store.delete_movement(token,password,selected);success(message="Deleted")
+            if st.form_submit_button(t("Delete movement"),type="primary"):
+                try:
+                    if not confirmed:raise AppError("Confirm delete")
+                    store.delete_movement(token,password,selected);success(message="Deleted")
                 except Exception as error:show_error(error)
     else:st.info(t("No deletable movements"))
 
@@ -616,8 +620,10 @@ def deletion_panel(store,token):
             st.caption(t("Movement history delete hint"))
             confirmed=st.checkbox(t("Confirm delete"),key="delete_history_report_confirm")
             password=st.text_input(t("Approval password"),type="password",key="password_delete_history")
-            if st.form_submit_button(t("Delete movement history report"),type="primary",disabled=not confirmed):
-                try:store.delete_movement_history(token,password);success(message="Deleted")
+            if st.form_submit_button(t("Delete movement history report"),type="primary"):
+                try:
+                    if not confirmed:raise AppError("Confirm delete")
+                    store.delete_movement_history(token,password);success(message="Deleted")
                 except Exception as error:show_error(error)
     else:st.info(t("No movement history report"))
 

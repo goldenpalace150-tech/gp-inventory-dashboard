@@ -299,3 +299,11 @@ def test_store_cache_is_versioned_by_build_and_stale_apperror_is_shown_safely():
     assert 'def get_store(settings_json,build):' in source
     assert 'get_store(json.dumps(config,sort_keys=True),BUILD)' in source
     assert 'type(error).__name__=="AppError"' in source
+
+
+def test_delete_confirmation_does_not_disable_form_submit_buttons():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'Delete invoice"),type="primary",disabled=not confirmed' not in source
+    assert 'Delete movement"),type="primary",disabled=not confirmed' not in source
+    assert 'Delete movement history report"),type="primary",disabled=not confirmed' not in source
+    assert source.count('if not confirmed:raise AppError("Confirm delete")') >= 3
