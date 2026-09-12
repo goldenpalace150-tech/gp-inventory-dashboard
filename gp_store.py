@@ -23,6 +23,7 @@ from sqlalchemy import (
     Boolean, Date, DateTime, JSON, ForeignKey, UniqueConstraint, CheckConstraint,
     Index, select, insert, update, delete, func, create_engine,
 )
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.engine import URL
 from sqlalchemy.pool import StaticPool
 
@@ -1070,12 +1071,27 @@ class Store:
         if not re.fullmatch(r"[A-Za-z0-9_.-]{3,80}",username):raise AppError("Use 3 to 80 letters, digits, dots or underscores for usernames")
         if role not in ("admin","store"):raise AppError("Invalid role")
         hashed=password_hash(new_password)
-        with self.engine.begin() as c:
-            self._lock(c);actor=self._actor(c,token,password,admin=True);t=self.tables["app_users"]
-            if c.execute(select(t.c.username).where(t.c.username==username)).first():raise AppError("Username already exists")
-            c.execute(insert(t).values(username=username,display_name=str(display_name or username)[:120],role=role,password_hash=hashed,
-                active=True,failed_attempts=0,created_at=utcnow()))
-            self._audit(c,actor["username"],"CREATE_USER",{"username":username,"role":role});self._touch(c)
+        display_name=str(display_name or username)[:120]
+        for attempt in range(2):
+            try:
+                with self.engine.begin() as c:
+                    self._lock(c);actor=self._actor(c,token,password,admin=True);t=self.tables["app_users"]
+                    if c.execute(select(t.c.username).where(t.c.username==username)).first():raise AppError("Username already exists")
+                    c.execute(insert(t).values(username=username,display_name=display_name,role=role,password_hash=hashed,
+                        active=True,failed_attempts=0,created_at=utcnow()))
+                    self._audit(c,actor["username"],"CREATE_USER",{"username":username,"role":role});self._touch(c)
+                return
+            except IntegrityError as error:
+                sqlstate=str(getattr(getattr(error,"orig",None),"sqlstate","") or "")
+                if sqlstate=="23505":raise AppError("Username already exists") from None
+                raise
+            except DBAPIError as error:
+                sqlstate=str(getattr(getattr(error,"orig",None),"sqlstate","") or "")
+                transient=bool(getattr(error,"connection_invalidated",False)) or sqlstate.startswith("08") or sqlstate in {"55P03","57014","57P01","57P02","57P03"}
+                if attempt==0 and transient:
+                    self.engine.dispose()
+                    continue
+                raise
 
     def change_password(self,token,password,new_password):
         hashed=password_hash(new_password)

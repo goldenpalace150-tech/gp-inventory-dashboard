@@ -264,3 +264,22 @@ def test_invoice_number_manual_fallback_and_closing_stock_compare_present():
     assert 'Upload closing stock report' in source
     assert 'comparison["Difference"]=comparison["Counted quantity"]-comparison["System quantity"]' in source
     assert 'GoldenPalace_Stock_Reconciliation_' in source
+
+
+def test_admin_can_create_user_and_duplicate_is_safe_error():
+    s=Store.for_tests();pw="Test-Password-2026";s.initialize(password=pw);t=s.login("admin",pw)
+    s.create_user(t,pw,"store1","Another-Test-Password-2026","store","Store User")
+    users={u["username"]:u for u in s.list_users(t)}
+    assert users["store1"]["role"]=="store"
+    assert users["store1"]["display_name"]=="Store User"
+    try:
+        s.create_user(t,pw,"store1","Another-Test-Password-2026","store","Store User")
+    except AppError as error:
+        assert str(error)=="Username already exists"
+    else:
+        raise AssertionError("duplicate username must fail")
+
+def test_safe_error_message_exposes_only_exception_class_and_sqlstate():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'safe_detail=kind+(" / SQLSTATE "+sqlstate if sqlstate else "")' in source
+    assert 'repr(error)' not in source

@@ -41,10 +41,12 @@ def show_error(error):
         st.error(t(str(error)))
     else:
         reference=str(uuid.uuid4())[:8]
-        sqlstate=getattr(getattr(error,"orig",None),"sqlstate","")
+        sqlstate=str(getattr(getattr(error,"orig",None),"sqlstate","") or "")
+        kind=type(error).__name__
         # No repr/traceback of a database error: it may include secrets or invoice data.
-        LOG.error("App failure id=%s type=%s sqlstate=%s",reference,type(error).__name__,sqlstate)
-        st.error("Save/connection not confirmed. Refresh the data before retrying. "
+        LOG.error("App failure id=%s type=%s sqlstate=%s",reference,kind,sqlstate)
+        safe_detail=kind+(" / SQLSTATE "+sqlstate if sqlstate else "")
+        st.error("Save/connection not confirmed ("+safe_detail+"). Refresh the data before retrying. "
                  "No local database is used. Reference: "+reference)
 
 
