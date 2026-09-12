@@ -219,3 +219,10 @@ def test_daily_report_empty_is_valid():
     sheets=day_report_sheets('2026-09-08',pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),False)
     assert sheets['Daily_Summary'].iloc[0]['movements']==0
     assert len(excel_bytes(sheets))>1000
+
+
+def test_invoice_entry_is_only_auto_or_manual():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'st.radio(t("Invoice entry"),["AUTO","MANUAL"]' in source
+    assert 'key="draft_selector"' not in source
+    assert 't("Start manual invoice")' in source

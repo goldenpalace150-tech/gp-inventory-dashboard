@@ -224,19 +224,23 @@ def invoices_page(store,token,state,stock):
         preview,tools=st.columns([1.0,1.25])
         with tools:
             st.markdown("#### "+t("New invoice"))
-            uploaded=st.file_uploader(t("Invoice image"),type=["png","jpg","jpeg"],key="invoice_upload")
-            camera_enabled=st.toggle(t("Camera"),key="camera_enabled")
-            if camera_enabled:
-                capture=st.camera_input(t("Invoice image"),key="camera_capture")
-                if capture:uploaded=capture
-            a,b=st.columns(2)
-            read=a.button(t("Read invoice"),type="primary",disabled=not (uploaded and ok and code_master_ready),width="stretch")
-            manual=b.button(t("Manual invoice"),width="stretch")
-            if not ok:st.info("OCR is unavailable on this host. Manual invoice entry remains available.")
-            if not code_master_ready:st.warning(t("Warehouse code master required"))
-            if manual:
-                st.session_state["selected_draft_id"]=store.create_draft(token,source_name=t("Manual invoice"))
-                st.rerun()
+            mode=st.radio(t("Invoice entry"),["AUTO","MANUAL"],horizontal=True,
+                format_func=lambda x:t("Automatic" if x=="AUTO" else "Manual"),key="invoice_entry_mode")
+            uploaded=None
+            if mode=="AUTO":
+                uploaded=st.file_uploader(t("Invoice image"),type=["png","jpg","jpeg"],key="invoice_upload")
+                camera_enabled=st.toggle(t("Camera"),key="camera_enabled")
+                if camera_enabled:
+                    capture=st.camera_input(t("Invoice image"),key="camera_capture")
+                    if capture:uploaded=capture
+                read=st.button(t("Read invoice"),type="primary",disabled=not (uploaded and ok and code_master_ready),width="stretch")
+                if not ok:st.info("OCR is unavailable on this host. Manual invoice entry remains available.")
+                if not code_master_ready:st.warning(t("Warehouse code master required"))
+            else:
+                read=False
+                if st.button(t("Start manual invoice"),type="primary",width="stretch",key="start_manual_invoice"):
+                    st.session_state["selected_draft_id"]=store.create_draft(token,source_name=t("Manual invoice"))
+                    st.rerun()
             if read:
                 content=uploaded.getvalue(); image_hash=hashlib.sha256(content).hexdigest()
                 draft_id=store.create_draft(token,source_name=uploaded.name,image_hash=image_hash)
@@ -284,10 +288,9 @@ def invoices_page(store,token,state,stock):
         choices={d["draft_id"]:d for d in drafts}
         selected=st.session_state.get("selected_draft_id")
         if selected not in choices:selected=drafts[0]["draft_id"]
-        if len(choices)>1:
-            selected=st.selectbox(t("Unfinished invoices"),list(choices),index=list(choices).index(selected),
-                format_func=lambda k: (choices[k]["payload"].get("invoice_number") or choices[k]["source_name"] or k[:8]),
-                key="draft_selector")
+        # Keep the operator flow simple: Auto / Manual are the only entry choices.
+        # If multiple unfinished drafts exist from older versions, continue the
+        # currently selected one (or newest one) without exposing a technical draft picker.
         st.session_state["selected_draft_id"]=selected
         draft=choices[selected];payload=draft["payload"];suffix=selected+"_"+str(draft["version"])
         rows=payload.get("items") or []
