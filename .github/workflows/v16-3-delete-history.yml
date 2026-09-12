@@ -1,0 +1,42 @@
+name: V16.3 delete movement history
+on:
+  push:
+    branches: [feature/delete-movement-history-v16-3]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply updater
+        run: python scripts/v16_3_delete_movement_history.py
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt 'pytest>=8,<10'
+      - name: Compile
+        run: python -m compileall -q inventory_tracker.py gp_ui.py gp_store.py
+      - name: Regression suite
+        run: python -m pytest -o addopts='' -q
+      - name: Validate markers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          store=Path('gp_store.py').read_text()
+          app=Path('inventory_tracker.py').read_text()
+          ui=Path('gp_ui.py').read_text()
+          assert 'def delete_movement_history' in store
+          assert '"history_report":history_report' in store
+          assert 'Delete movement history report' in app
+          assert 'GP-CLOUD-v16.3' in ui
+          print('v16.3 markers OK')
+          PY
+      - name: Commit validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add gp_store.py inventory_tracker.py gp_ui.py
+          git diff --cached --quiet || git commit -m 'feat: allow admin to delete imported movement history v16.3'
+          git push
