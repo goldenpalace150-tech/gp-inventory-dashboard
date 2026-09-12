@@ -221,6 +221,18 @@ def test_daily_report_empty_is_valid():
     assert len(excel_bytes(sheets))>1000
 
 
+
+def test_auto_invoice_metadata_is_read_only_and_duplicates_are_automatic():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'auto_invoice=bool(draft.get("image_hash"))' in source
+    assert 'disabled=auto_invoice' in source
+    assert 'kind_auto_' in source and 'disabled=True' in source
+    assert 'duplicate_action=' not in source
+    assert 'if duplicate.get("identical"):' in source
+    assert 'store.replace_invoice(' in source
+    assert 'Automatic invoice number required' in source
+    assert 'Automatic movement type required' in source
+
 def test_invoice_entry_is_only_auto_or_manual():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
     assert 'st.radio(t("Invoice entry"),["AUTO","MANUAL"]' in source

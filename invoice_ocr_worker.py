@@ -29,7 +29,7 @@ for _name in (
 os.environ["MALLOC_ARENA_MAX"] = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-BUILD = "GP-OCR-WAREHOUSE-v16"
+BUILD = "GP-OCR-WAREHOUSE-v16.5"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 MAX_SOURCE_SIDE = 1200
@@ -411,9 +411,9 @@ def extract_invoice(image_path):
         "تمت قراءة رموز المواد والكميات ورقم الفاتورة آلياً. راجع كل سطر قبل الاعتماد.",
     ]
     if not movement_type:
-        warnings.append("نوع الحركة غير مؤكد؛ اختر إدخال أو إخراج يدوياً.")
+        warnings.append("نوع الحركة غير مؤكد؛ أعد تصوير الفاتورة بصورة أوضح.")
     if header_failed:
-        warnings.append("تعذر قراءة بيانات رأس الفاتورة؛ أدخل نوع الحركة واسم الزبون يدوياً عند الحاجة.")
+        warnings.append("تعذر قراءة بيانات رأس الفاتورة؛ أعد تصوير الفاتورة بصورة أوضح.")
 
     items = []
     for index, row in enumerate(rows):
@@ -424,7 +424,7 @@ def extract_invoice(image_path):
 
     reference, printed_total = parse_summary(boxes, width, height)
     if not reference:
-        warnings.append("Reference is uncertain; enter the reference from the document.")
+        warnings.append("Reference is uncertain; retake a clearer invoice photo.")
 
     known_quantities = [item["quantity"] for item in items if item["quantity"] is not None]
     if printed_total is not None and len(known_quantities) == len(items):
