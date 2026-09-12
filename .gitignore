@@ -11,3 +11,6 @@ backups/
 *.gpbackup
 *.json.gz
 *.key
+*.egg-info/
+build/
+dist/
