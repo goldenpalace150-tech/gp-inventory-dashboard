@@ -293,6 +293,7 @@ def invoices_page(store,token,state,stock):
         # currently selected one (or newest one) without exposing a technical draft picker.
         st.session_state["selected_draft_id"]=selected
         draft=choices[selected];payload=draft["payload"];suffix=selected+"_"+str(draft["version"])
+        auto_invoice=bool(draft.get("image_hash"))
         rows=payload.get("items") or []
         try:rows,ignored_saved=canonicalize_invoice_rows(rows,stock,drop_unknown=True)
         except AppError:rows,ignored_saved=[],[]
@@ -303,12 +304,18 @@ def invoices_page(store,token,state,stock):
         frame["quantity"]=pd.to_numeric(frame["quantity"],errors="coerce")
         with st.form("review_"+suffix):
             a,b,c,d=st.columns([1.15,1.5,1.15,1])
-            reference=a.text_input(t("Reference"),value=str(payload.get("invoice_number","")),key="reference_"+suffix)
-            customer=b.text_input(t("Customer name"),value=str(payload.get("customer_name","")),key="customer_"+suffix)
+            reference=a.text_input(t("Reference"),value=str(payload.get("invoice_number","")),key="reference_"+suffix,disabled=auto_invoice)
+            customer=b.text_input(t("Customer name"),value=str(payload.get("customer_name","")),key="customer_"+suffix,disabled=auto_invoice)
             driver=c.text_input(t("Driver"),value=str(payload.get("driver","")),key="driver_"+suffix)
             kinds=["","OUT","IN"]
             current_kind=payload.get("movement_type","") if payload.get("movement_type","") in kinds else ""
-            kind=d.selectbox(t("Movement type"),kinds,index=kinds.index(current_kind),format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
+            if auto_invoice:
+                d.text_input(t("Movement type"),value=t(current_kind) if current_kind else t("Not detected"),key="kind_auto_"+suffix,disabled=True)
+                kind=current_kind
+            else:
+                kind=d.selectbox(t("Movement type"),kinds,index=kinds.index(current_kind),format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
+            if auto_invoice and (not reference.strip() or kind not in ("IN","OUT")):
+                st.warning(t("Automatic invoice fields incomplete"))
             st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
             edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,disabled=["item_name"],
                 column_config={"item_code":st.column_config.TextColumn(COL_CODE),"item_name":st.column_config.TextColumn(COL_NAME),
@@ -316,7 +323,9 @@ def invoices_page(store,token,state,stock):
             total=float(pd.to_numeric(edited["quantity"],errors="coerce").fillna(0).sum())
             st.caption(f"{t('Items')}: {len(edited)}   |   {t('Total quantity')}: {total:.1f}")
             st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
-            duplicate_action=st.selectbox(t("Duplicate action"),["ignore","overwrite"],format_func=lambda x:t("Ignore duplicate" if x=="ignore" else "Overwrite if changed"),key="duplicate_"+suffix,help=t("Duplicate invoice hint"))
+            if auto_invoice:
+                st.caption(t("Automatic fields hint"))
+            st.caption(t("Automatic duplicate hint"))
             password=st.text_input(t("Approval password"),type="password",key="password_invoice_"+suffix)
             a,b=st.columns(2)
             save=a.form_submit_button(t("Save changes"),width="stretch")
@@ -324,6 +333,8 @@ def invoices_page(store,token,state,stock):
             if save or post:
                 try:
                     canonical_rows,_=canonicalize_invoice_rows(edited.to_dict("records"),stock,drop_unknown=False)
+                    if auto_invoice and not reference.strip():raise AppError("Automatic invoice number required")
+                    if auto_invoice and kind not in ("IN","OUT"):raise AppError("Automatic movement type required")
                     updated=dict(payload);updated.update(invoice_number=reference.strip(),movement_type=kind,
                         customer_name=customer.strip(),driver=driver.strip(),items=clean_json(canonical_rows))
                     if save:
@@ -332,7 +343,7 @@ def invoices_page(store,token,state,stock):
                         changes=match_invoice_lines(updated["items"],store.stock(token),kind)
                         duplicate=store.invoice_duplicate(token,reference,changes,updated)
                         if duplicate.get("exists"):
-                            if duplicate.get("identical") or duplicate_action=="ignore":
+                            if duplicate.get("identical"):
                                 store.discard_draft(token,selected);success(message="Duplicate ignored")
                             else:
                                 store.replace_invoice(token,password,changes,nonce("invoice_update_"+selected),reference=reference,

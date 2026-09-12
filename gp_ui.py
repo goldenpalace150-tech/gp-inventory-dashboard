@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v16.4"
+BUILD = "GP-CLOUD-v16.5"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -189,6 +189,17 @@ AR.update({
     "Automatic": "تلقائي",
     "Manual": "يدوي",
     "Start manual invoice": "بدء فاتورة يدوية",
+})
+
+
+# ---- v16.5 automatic invoice metadata ----
+AR.update({
+    "Not detected": "غير مكتشف",
+    "Automatic fields hint": "في الوضع التلقائي يقرأ النظام نوع الحركة ورقم الفاتورة واسم الزبون إن وُجد. السائق هو الحقل اليدوي الوحيد من بيانات رأس الفاتورة.",
+    "Automatic duplicate hint": "الفاتورة المكررة تُعالج تلقائياً: إذا كانت مطابقة يتم تجاهلها، وإذا تغيّرت البنود أو الكميات يتم تحديث الفاتورة الموجودة.",
+    "Automatic invoice fields incomplete": "لم تكتمل القراءة التلقائية لرأس الفاتورة. أعد التصوير بصورة أوضح قبل الاعتماد.",
+    "Automatic invoice number required": "تعذر قراءة رقم الفاتورة تلقائياً. أعد التصوير بصورة أوضح.",
+    "Automatic movement type required": "تعذر قراءة نوع الحركة تلقائياً. أعد التصوير بصورة أوضح.",
 })
 
 def set_language(value):
