@@ -244,7 +244,7 @@ def test_auto_invoice_metadata_is_read_only_and_duplicates_are_automatic():
     assert 'duplicate_action=' not in source
     assert 'if duplicate.get("identical"):' in source
     assert 'store.replace_invoice(' in source
-    assert 'Automatic invoice number required' in source
+    assert 'Invoice number required' in source
     assert 'movement_fallback=auto_invoice and current_kind not in ("IN","OUT")' in source
     assert 'Movement type required' in source
 
@@ -253,3 +253,14 @@ def test_invoice_entry_is_only_auto_or_manual():
     assert 'st.radio(t("Invoice entry"),["AUTO","MANUAL"]' in source
     assert 'key="draft_selector"' not in source
     assert 't("Start manual invoice")' in source
+
+
+def test_invoice_number_manual_fallback_and_closing_stock_compare_present():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'reference_fallback=auto_invoice and not detected_reference' in source
+    assert 'disabled=auto_invoice and not reference_fallback' in source
+    assert 'Invoice number manual fallback' in source
+    assert 'if not reference.strip():raise AppError("Invoice number required")' in source
+    assert 'Upload closing stock report' in source
+    assert 'comparison["Difference"]=comparison["Counted quantity"]-comparison["System quantity"]' in source
+    assert 'GoldenPalace_Stock_Reconciliation_' in source

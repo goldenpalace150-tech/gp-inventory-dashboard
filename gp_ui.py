@@ -3,7 +3,7 @@ from pathlib import Path
 import base64
 import html
 
-BUILD = "GP-CLOUD-v16.6"
+BUILD = "GP-CLOUD-v16.7"
 ROOT = Path(__file__).resolve().parent
 AR = {
     "Golden Palace": "\u0627\u0644\u0642\u0635\u0631 \u0627\u0644\u0630\u0647\u0628\u064a",
@@ -208,6 +208,25 @@ AR.update({
     "Movement type manual fallback": "تعذر تحديد نوع الحركة تلقائياً. اختر إدخال أو إخراج يدوياً.",
     "Automatic invoice number missing": "تعذر قراءة رقم الفاتورة تلقائياً. أعد التصوير بصورة أوضح.",
     "Movement type required": "اختر نوع الحركة: إدخال أو إخراج.",
+})
+
+
+# ---- v16.7 invoice fallback + closing stock reconciliation ----
+AR.update({
+    "Invoice number manual fallback": "تعذر قراءة رقم الفاتورة تلقائياً. أدخل رقم الفاتورة يدوياً.",
+    "Automatic invoice number missing manual allowed": "تعذر قراءة رقم الفاتورة تلقائياً. يمكنك إدخاله يدوياً ثم اعتماد الفاتورة.",
+    "Invoice number required": "أدخل رقم الفاتورة.",
+    "End of day stock check": "مطابقة جرد نهاية اليوم",
+    "End of day stock check hint": "ارفع تقرير جرد المستودع في نهاية اليوم لمقارنة الكميات الفعلية مع رصيد النظام قبل الإقفال.",
+    "Upload closing stock report": "رفع تقرير جرد نهاية اليوم",
+    "Compared items": "الأصناف المقارنة",
+    "Matching items": "الأصناف المطابقة",
+    "Different items": "الأصناف المختلفة",
+    "System quantity": "كمية النظام",
+    "Counted quantity": "الكمية الفعلية",
+    "Difference": "الفرق",
+    "Closing stock matches": "الجرد الفعلي مطابق لرصيد النظام.",
+    "Closing stock differences found": "توجد فروقات بين الجرد الفعلي ورصيد النظام.",
 })
 
 def set_language(value):

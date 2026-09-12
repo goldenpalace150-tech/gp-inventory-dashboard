@@ -304,7 +304,10 @@ def invoices_page(store,token,state,stock):
         frame["quantity"]=pd.to_numeric(frame["quantity"],errors="coerce")
         with st.form("review_"+suffix):
             a,b,c,d=st.columns([1.15,1.5,1.15,1])
-            reference=a.text_input(t("Reference"),value=str(payload.get("invoice_number","")),key="reference_"+suffix,disabled=auto_invoice)
+            detected_reference=str(payload.get("invoice_number","")).strip()
+            reference_fallback=auto_invoice and not detected_reference
+            reference=a.text_input(t("Reference"),value=detected_reference,key="reference_"+suffix,disabled=auto_invoice and not reference_fallback)
+            if reference_fallback:st.caption(t("Invoice number manual fallback"))
             customer=b.text_input(t("Customer name"),value=str(payload.get("customer_name","")),key="customer_"+suffix,disabled=auto_invoice)
             driver=c.text_input(t("Driver"),value=str(payload.get("driver","")),key="driver_"+suffix)
             kinds=["","OUT","IN"]
@@ -316,8 +319,8 @@ def invoices_page(store,token,state,stock):
             else:
                 kind=d.selectbox(t("Movement type"),kinds,index=kinds.index(current_kind),format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
                 if movement_fallback:st.caption(t("Movement type manual fallback"))
-            if auto_invoice and not reference.strip():
-                st.warning(t("Automatic invoice number missing"))
+            if auto_invoice and reference_fallback:
+                st.warning(t("Automatic invoice number missing manual allowed"))
             st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
             edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,disabled=["item_name"],
                 column_config={"item_code":st.column_config.TextColumn(COL_CODE),"item_name":st.column_config.TextColumn(COL_NAME),
@@ -335,7 +338,7 @@ def invoices_page(store,token,state,stock):
             if save or post:
                 try:
                     canonical_rows,_=canonicalize_invoice_rows(edited.to_dict("records"),stock,drop_unknown=False)
-                    if auto_invoice and not reference.strip():raise AppError("Automatic invoice number required")
+                    if not reference.strip():raise AppError("Invoice number required")
                     if kind not in ("IN","OUT"):raise AppError("Movement type required")
                     updated=dict(payload);updated.update(invoice_number=reference.strip(),movement_type=kind,
                         customer_name=customer.strip(),driver=driver.strip(),items=clean_json(canonical_rows))
@@ -451,7 +454,37 @@ def closing_page(store,token,state,stock,actor):
     analysis=pd.DataFrame(closure["analysis"]) if closure else (analysis_now(store,token,state) if day==store.today() else pd.DataFrame())
     report=day_report_sheets(day,ledger,day_stock,analysis,closure)
     export_button("GoldenPalace_Day_"+day.isoformat(),report)
+
     if not closure and actor["role"]=="admin" and day==store.today():
+        st.divider()
+        section("End of day stock check","End of day stock check hint")
+        counted_file=st.file_uploader(t("Upload closing stock report"),type=["xlsx","xls"],key="closing_stock_report")
+        if counted_file:
+            try:
+                counted=parse_stock_report(counted_file.getvalue())
+                expected=stock[[COL_KEY,COL_CODE,COL_NAME,COL_QTY]].copy().rename(columns={COL_QTY:"System quantity"})
+                physical=counted[[COL_KEY,COL_CODE,COL_NAME,COL_QTY]].copy().rename(columns={COL_QTY:"Counted quantity"})
+                comparison=expected.merge(physical[[COL_KEY,"Counted quantity"]],on=COL_KEY,how="outer")
+                comparison[COL_CODE]=comparison[COL_CODE].fillna("")
+                comparison[COL_NAME]=comparison[COL_NAME].fillna("")
+                comparison["System quantity"]=pd.to_numeric(comparison["System quantity"],errors="coerce").fillna(0.0)
+                comparison["Counted quantity"]=pd.to_numeric(comparison["Counted quantity"],errors="coerce").fillna(0.0)
+                comparison["Difference"]=comparison["Counted quantity"]-comparison["System quantity"]
+                differences=comparison[comparison["Difference"].abs()>0.0001].copy()
+                a,b,c=st.columns(3)
+                a.metric(t("Compared items"),f"{len(comparison):,}")
+                b.metric(t("Matching items"),f"{len(comparison)-len(differences):,}")
+                c.metric(t("Different items"),f"{len(differences):,}")
+                if differences.empty:
+                    st.success(t("Closing stock matches"))
+                else:
+                    st.warning(t("Closing stock differences found"))
+                    shown=differences[[COL_CODE,COL_NAME,"System quantity","Counted quantity","Difference"]].rename(columns={
+                        "System quantity":t("System quantity"),"Counted quantity":t("Counted quantity"),"Difference":t("Difference")})
+                    table(shown,height=360)
+                    export_button("GoldenPalace_Stock_Reconciliation_"+day.isoformat(),{"Comparison":comparison,"Differences":differences})
+            except Exception as error:show_error(error)
+
         with st.form("close_day"):
             st.warning(t("Close warning"))
             confirm=st.checkbox(t("Confirm closing"))
