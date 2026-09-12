@@ -1069,7 +1069,7 @@ class Store:
             self._actor(c,token,admin=True);t=self.tables["app_users"]
             return [dict(r) for r in c.execute(select(t.c.username,t.c.display_name,t.c.role,t.c.active,t.c.created_at)).mappings()]
 
-    def create_user(self,token,password,username,new_password,role,display_name=""):
+    def create_user(self,token,username,new_password,role,display_name=""):
         username=str(username).strip()
         if not username:raise AppError("Username is required")
         if len(username)>80:raise AppError("Username is too long")
@@ -1079,7 +1079,7 @@ class Store:
         for attempt in range(2):
             try:
                 with self.engine.begin() as c:
-                    self._lock(c);actor=self._actor(c,token,password,admin=True);t=self.tables["app_users"]
+                    self._lock(c);actor=self._actor(c,token,admin=True);t=self.tables["app_users"]
                     if c.execute(select(t.c.username).where(t.c.username==username)).first():raise AppError("Username already exists")
                     c.execute(insert(t).values(username=username,display_name=display_name,role=role,password_hash=hashed,
                         active=True,failed_attempts=0,created_at=utcnow()))

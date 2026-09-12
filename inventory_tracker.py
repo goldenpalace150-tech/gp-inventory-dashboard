@@ -661,9 +661,8 @@ def settings_page(store,token,state,stock,actor):
                 display=b.text_input(t("Display name"),key="new_display")
                 role=st.selectbox(t("Role"),["store","admin"],format_func=t,key="new_role")
                 newpass=st.text_input(t("New password"),type="password",key="password_newuser")
-                password=st.text_input(t("Approval password"),type="password",key="password_useradmin")
                 if st.form_submit_button(t("Save"),type="primary"):
-                    try:store.create_user(token,password,username,newpass,role,display);success()
+                    try:store.create_user(token,username,newpass,role,display);success()
                     except Exception as error:show_error(error)
             other_users=[r["username"] for r in users if r["username"]!=actor["username"]]
             if other_users:

@@ -54,9 +54,9 @@ def test_password_hash_unique():
 def test_simple_passwords_are_allowed_for_users():
     s=Store.for_tests();s.initialize(password="admin-bootstrap")
     t=s.login("admin","admin-bootstrap")
-    s.create_user(t,"admin-bootstrap","a","1","store","A")
+    s.create_user(t,"a","1","store","A")
     assert s.login("a","1")
-    s.create_user(t,"admin-bootstrap","user name","","store","Blank Password")
+    s.create_user(t,"user name","","store","Blank Password")
     assert s.login("user name","")
 
 
@@ -175,7 +175,7 @@ def test_draft_post_atomic(env):
 
 
 def test_staff_cannot_replace_stock_or_create_user(env):
-    s,t=env;s.create_user(t,PASS,"store",PASS,"store")
+    s,t=env;s.create_user(t,"store",PASS,"store")
     staff=s.login("store",PASS)
     with pytest.raises(AppError):s.replace_stock(staff,PASS,sample_stock(),"bad",s.state(t)["revision"])
     with pytest.raises(AppError):s.create_user(staff,PASS,"hacker",PASS,"admin")
@@ -184,14 +184,14 @@ def test_staff_cannot_replace_stock_or_create_user(env):
 
 
 def test_drafts_are_owner_scoped(env):
-    s,t=env;s.create_user(t,PASS,"store",PASS,"store")
+    s,t=env;s.create_user(t,"store",PASS,"store")
     staff=s.login("store",PASS);d=s.create_draft(t)
     assert s.drafts(staff)==[]
     with pytest.raises(AppError):s.save_draft(staff,d,{"items":[]},1)
 
 
 def test_deactivation_revokes_sessions(env):
-    s,t=env;s.create_user(t,PASS,"store",PASS,"store");staff=s.login("store",PASS)
+    s,t=env;s.create_user(t,"store",PASS,"store");staff=s.login("store",PASS)
     s.set_user_active(t,PASS,"store",False)
     with pytest.raises(AppError):s.actor(staff)
 
@@ -303,5 +303,5 @@ def test_usernames_have_no_character_or_minimum_length_rule():
     s=Store.for_tests();s.initialize(password="bootstrap")
     t=s.login("admin","bootstrap")
     for username in ["x","موظف مخزن","user name","@"]:
-        s.create_user(t,"bootstrap",username,"p","store",username)
+        s.create_user(t,username,"p","store",username)
         assert s.login(username,"p")

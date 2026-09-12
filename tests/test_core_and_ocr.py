@@ -268,12 +268,12 @@ def test_invoice_number_manual_fallback_and_closing_stock_compare_present():
 
 def test_admin_can_create_user_and_duplicate_is_safe_error():
     s=Store.for_tests();pw="Test-Password-2026";s.initialize(password=pw);t=s.login("admin",pw)
-    s.create_user(t,pw,"store1","Another-Test-Password-2026","store","Store User")
+    s.create_user(t,"store1","Another-Test-Password-2026","store","Store User")
     users={u["username"]:u for u in s.list_users(t)}
     assert users["store1"]["role"]=="store"
     assert users["store1"]["display_name"]=="Store User"
     try:
-        s.create_user(t,pw,"store1","Another-Test-Password-2026","store","Store User")
+        s.create_user(t,"store1","Another-Test-Password-2026","store","Store User")
     except AppError as error:
         assert str(error)=="Username already exists"
     else:
@@ -283,3 +283,12 @@ def test_safe_error_message_exposes_only_exception_class_and_sqlstate():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
     assert 'safe_detail=kind+(" / SQLSTATE "+sqlstate if sqlstate else "")' in source
     assert 'repr(error)' not in source
+
+
+def test_new_user_form_has_no_approval_password_and_backend_uses_session_only():
+    app=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    store=(Path(__file__).resolve().parents[1]/"gp_store.py").read_text()
+    assert 'key="password_useradmin"' not in app
+    assert 'store.create_user(token,username,newpass,role,display)' in app
+    assert 'def create_user(self,token,username,new_password,role,display_name=""):' in store
+    assert 'actor=self._actor(c,token,admin=True)' in store
