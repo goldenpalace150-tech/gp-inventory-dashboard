@@ -239,7 +239,7 @@ def invoices_page(store,token,state,stock):
                 uploaded=st.file_uploader(t("Invoice image"),type=["png","jpg","jpeg"],key="invoice_upload")
                 camera_enabled=st.toggle(t("Camera"),key="camera_enabled")
                 if camera_enabled:
-                    capture=st.camera_input(t("Invoice image"),key="camera_capture")
+                    capture=st.camera_input(t("Invoice image"),key="camera_capture",resolution="1080p",width="stretch")
                     if capture:uploaded=capture
                 read=st.button(t("Read invoice"),type="primary",disabled=not (uploaded and ok and code_master_ready),width="stretch")
                 if not ok:st.info("OCR is unavailable on this host. Manual invoice entry remains available.")
@@ -313,22 +313,14 @@ def invoices_page(store,token,state,stock):
         with st.form("review_"+suffix):
             a,b,c,d=st.columns([1.15,1.5,1.15,1])
             detected_reference=str(payload.get("invoice_number","")).strip()
-            reference_fallback=auto_invoice and not detected_reference
-            reference=a.text_input(t("Reference"),value=detected_reference,key="reference_"+suffix,disabled=auto_invoice and not reference_fallback)
-            if reference_fallback:st.caption(t("Invoice number manual fallback"))
+            reference=a.text_input(t("Reference"),value=detected_reference,key="reference_"+suffix)
+            if auto_invoice and not detected_reference:st.caption(t("Invoice number manual fallback"))
             customer=b.text_input(t("Customer name"),value=str(payload.get("customer_name","")),key="customer_"+suffix,disabled=auto_invoice)
             driver=c.text_input(t("Driver"),value=str(payload.get("driver","")),key="driver_"+suffix)
             kinds=["","OUT","IN"]
             current_kind=payload.get("movement_type","") if payload.get("movement_type","") in kinds else ""
-            movement_fallback=auto_invoice and current_kind not in ("IN","OUT")
-            if auto_invoice and not movement_fallback:
-                d.text_input(t("Movement type"),value=t(current_kind),key="kind_auto_"+suffix,disabled=True)
-                kind=current_kind
-            else:
-                kind=d.selectbox(t("Movement type"),kinds,index=kinds.index(current_kind),format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
-                if movement_fallback:st.caption(t("Movement type manual fallback"))
-            if auto_invoice and reference_fallback:
-                st.warning(t("Automatic invoice number missing manual allowed"))
+            kind=d.selectbox(t("Movement type"),kinds,index=kinds.index(current_kind),format_func=lambda k:t(k or "Select"),key="kind_"+suffix)
+            if auto_invoice and current_kind not in ("IN","OUT"):st.caption(t("Movement type manual fallback"))
             st.markdown('<div class="gp-form-gap"></div>',unsafe_allow_html=True)
             edited=st.data_editor(frame,hide_index=True,num_rows="dynamic",width="stretch",key="lines_"+suffix,disabled=["item_name"],
                 column_config={"item_code":st.column_config.TextColumn(COL_CODE),"item_name":st.column_config.TextColumn(COL_NAME),

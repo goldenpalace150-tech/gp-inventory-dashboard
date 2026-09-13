@@ -229,24 +229,15 @@ def test_delivery_word_fallback_detects_out_movement():
     assert movement=="OUT"
 
 
-def test_auto_invoice_allows_manual_movement_only_when_ocr_misses_it():
+def test_auto_invoice_fields_are_prefilled_but_correctable():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
-    assert 'movement_fallback=auto_invoice and current_kind not in ("IN","OUT")' in source
-    assert 'if movement_fallback:st.caption(t("Movement type manual fallback"))' in source
+    assert 'reference=a.text_input(t("Reference"),value=detected_reference,key="reference_"+suffix)' in source
+    assert 'kind=d.selectbox(t("Movement type"),kinds,index=kinds.index(current_kind)' in source
+    assert 'kind_auto_' not in source
     assert 'if kind not in ("IN","OUT"):raise AppError("Movement type required")' in source
-    assert 'Automatic movement type required' not in source
-
-def test_auto_invoice_metadata_is_read_only_and_duplicates_are_automatic():
-    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
-    assert 'auto_invoice=bool(draft.get("image_hash"))' in source
-    assert 'disabled=auto_invoice' in source
-    assert 'kind_auto_' in source and 'disabled=True' in source
     assert 'duplicate_action=' not in source
-    assert 'if duplicate.get("identical"):' in source
     assert 'store.replace_invoice(' in source
-    assert 'Invoice number required' in source
-    assert 'movement_fallback=auto_invoice and current_kind not in ("IN","OUT")' in source
-    assert 'Movement type required' in source
+
 
 def test_invoice_entry_is_only_auto_or_manual():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
@@ -255,15 +246,20 @@ def test_invoice_entry_is_only_auto_or_manual():
     assert 't("Start manual invoice")' in source
 
 
-def test_invoice_number_manual_fallback_and_closing_stock_compare_present():
+def test_invoice_review_and_closing_stock_compare_present():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
-    assert 'reference_fallback=auto_invoice and not detected_reference' in source
-    assert 'disabled=auto_invoice and not reference_fallback' in source
+    assert 'reference=a.text_input(t("Reference"),value=detected_reference,key="reference_"+suffix)' in source
     assert 'Invoice number manual fallback' in source
     assert 'if not reference.strip():raise AppError("Invoice number required")' in source
     assert 'Upload closing stock report' in source
     assert 'comparison["Difference"]=comparison["Counted quantity"]-comparison["System quantity"]' in source
-    assert 'GoldenPalace_Stock_Reconciliation_' in source
+
+
+def test_mobile_camera_requests_1080p_full_width_and_items_are_editable():
+    source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
+    assert 'resolution="1080p",width="stretch"' in source
+    assert 'st.data_editor(frame,hide_index=True,num_rows="dynamic"' in source
+    assert 'disabled=["item_name"]' in source
 
 
 def test_admin_can_create_user_and_duplicate_is_safe_error():
