@@ -322,3 +322,8 @@ def test_closing_and_settings_share_stock_reconciliation_helper():
     source=(Path(__file__).resolve().parents[1]/"inventory_tracker.py").read_text()
     assert 'def _stock_reconciliation(expected_stock,counted,day):' in source
     assert '_stock_reconciliation(stock,counted,day)' in source
+
+
+def test_rapidocr_pin_is_refreshed_for_model_permissions():
+    req=(Path(__file__).resolve().parents[1]/"requirements.txt").read_text()
+    assert "rapidocr==3.8.4" in req
