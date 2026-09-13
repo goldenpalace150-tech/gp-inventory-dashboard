@@ -327,3 +327,10 @@ def test_closing_and_settings_share_stock_reconciliation_helper():
 def test_rapidocr_pin_is_refreshed_for_model_permissions():
     req=(Path(__file__).resolve().parents[1]/"requirements.txt").read_text()
     assert "rapidocr==3.8.4" in req
+
+
+def test_rapidocr_uses_writable_model_root():
+    source=(Path(__file__).resolve().parents[1]/"invoice_ocr_worker.py").read_text()
+    assert 'GP_RAPIDOCR_MODEL_ROOT' in source
+    assert '/tmp/gp_rapidocr_models' in source
+    assert source.count('"Global.model_root_dir": _rapidocr_model_root()')==2

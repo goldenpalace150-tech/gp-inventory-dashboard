@@ -29,7 +29,7 @@ for _name in (
 os.environ["MALLOC_ARENA_MAX"] = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-BUILD = "GP-OCR-WAREHOUSE-v16.15"
+BUILD = "GP-OCR-WAREHOUSE-v16.16"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 MAX_SOURCE_SIDE = 1200
@@ -37,6 +37,14 @@ MAX_ROWS = 60
 _MIN_SCORE = 0.35
 _engine = None
 _arabic_engine = None
+
+# Streamlit Cloud may expose site-packages as read-only. RapidOCR normally
+# resolves/downloads ONNX files under site-packages/rapidocr/models. Force all
+# OCR model files into a writable process cache instead.
+def _rapidocr_model_root():
+    root=Path(os.environ.get("GP_RAPIDOCR_MODEL_ROOT","/tmp/gp_rapidocr_models"))
+    root.mkdir(parents=True,exist_ok=True)
+    return str(root)
 
 
 def _stage(name: str, **details) -> None:
@@ -55,6 +63,7 @@ def get_engine():
     # Mobile PP-OCRv4 models plus one ONNX thread reduce host memory and latency.
     _engine = RapidOCR(params={
         "Global.use_cls": False,
+        "Global.model_root_dir": _rapidocr_model_root(),
         "Global.max_side_len": 900,
         "Global.text_score": 0.35,
         "EngineConfig.onnxruntime.intra_op_num_threads": 1,
@@ -85,6 +94,7 @@ def get_arabic_engine():
 
     _arabic_engine = RapidOCR(params={
         "Global.use_cls": False,
+        "Global.model_root_dir": _rapidocr_model_root(),
         "Global.max_side_len": 900,
         "Global.text_score": 0.30,
         "EngineConfig.onnxruntime.intra_op_num_threads": 1,
